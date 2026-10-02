@@ -1,0 +1,39 @@
+{
+  "kind": "app",
+  "name": "chain",
+  "version": "0.1.0",
+  "programs": {
+    "chain": "bin/chain.wasm"
+  },
+  "config": {
+    "chain": {}
+  },
+  "provides": [
+    {
+      "interface": "chain/1",
+      "functions": {
+        "ingest": {
+          "writes": true,
+          "args": {"beef": "any"},
+          "answer": {"txid": "string", "tx": "cid", "state": "string", "block?": "cid", "height?": "int", "txStatus?": "string", "reason?": "string", "settlement?": "cid", "broadcast?": "cid"}
+        },
+        "status": {
+          "writes": false,
+          "args": {"txid": "string"},
+          "answer": {"txid": "string", "tx?": "cid", "state": "string", "block?": "cid", "height?": "int", "txStatus?": "string", "reason?": "string", "settlement?": "cid", "broadcast?": "cid"}
+        },
+        "proof": {
+          "writes": false,
+          "args": {"txid": "string"},
+          "answer": {"txid": "string", "tx": "cid", "block": "cid", "height": "int", "depth": "int", "position": "int"}
+        }
+      }
+    }
+  ],
+  "requires": [],
+  "dispatch": [
+    {"address": "chain", "sender": "*", "program": "chain"},
+    {"address": "status", "sender": "$status", "program": "chain", "optional": true}
+  ],
+  "description": "The chain module (shruggr/skein#78): the one writer of the instance's chain state — headers, transactions, proofs, spends, settlement, broadcasts — under chain/state; everyone else reads it by CID. Box chain: {fn: ingest | status | proof, args} from anyone, and the host's events (header from its feeds, proof from its broadcaster); box status: the status provider's messages (optional: left out on a host with none). Ingest a BEEF: proven, answered at once; unproven, recorded, broadcast, and answered on each state change (accepted, proven, rejected). docs/CHAIN.md."
+}
