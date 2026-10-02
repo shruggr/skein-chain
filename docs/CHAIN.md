@@ -1,4 +1,4 @@
-# The chain module
+# The chain app (0.2.0)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an
@@ -156,6 +156,24 @@ The chain app is the only thing that emits the broadcast event. The
 wallet and the overlay apps (shruggr/skein#79) neither broadcast nor take
 headers, proofs or statuses: they send `ingest` and wait on the answers.
 
+## Where it is going: a reference is a subscription
+
+What is built above is a one-shot answer set: a watcher is answered until
+its transaction is `proven` or `rejected`, and its registration ends there
+(the broadcast record goes with it). The decided direction (shruggr/skein#31,
+"Decided 2026-10-02 (night)") changes that, and is not built yet:
+
+- A registration lasts for the life of the transaction. Every change of its
+  chain state (accepted, proven, reorged out, conflicted by a proven spend)
+  goes to every registrant, which wakes and reads the chain state again.
+- There is no unwind or replay as an action. Whether a judgement counts is
+  a read of the chain state; a judgement is re-run when the chain state it
+  depended on changes.
+- A rejection by Arcade is not a state of the chain. A parent with no proof
+  is a point of pausing until something changes.
+- Fetching missing ancestors is not this app's: it is a separate monitor
+  tool.
+
 ## The manifest
 
 `etc/app.json` (the #77 shape):
@@ -188,7 +206,7 @@ else `defaults.walletAbandonMs`, else a day; 0: never).
 Its writes are heads under its name (skein's write-scope rule, #77):
 `chain/state`. Wired at boot by a system tree instead (`bin/chain.wasm`
 and the rows in `etc/dispatch.json`), its program is named `chain` and
-the stock genesis scope `chain: ["chain/"]` lets it write the same head.
+the default scope for a program named `chain` (`chain: ["chain/"]`, skein `src/host/genesis.ts`) lets it write the same head.
 
 ## Install
 
