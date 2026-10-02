@@ -1,7 +1,7 @@
 {
   "kind": "app",
   "name": "chain",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "programs": {
     "chain": "bin/chain.wasm"
   },
@@ -32,8 +32,10 @@
   ],
   "requires": [],
   "dispatch": [
-    {"address": "chain", "sender": "*", "program": "chain"},
+    {"address": "chain", "sender": "event", "program": "chain"},
+    {"address": "chain", "sender": "$self", "program": "chain"},
+    {"address": "chain", "sender": "$owner", "program": "chain"},
     {"address": "status", "sender": "$status", "program": "chain", "optional": true}
   ],
-  "description": "The chain module (shruggr/skein#78): the one writer of the instance's chain state — headers, transactions, proofs, spends, settlement, broadcasts — under chain/state; everyone else reads it by CID. Box chain: {fn: ingest | status | proof, args} from anyone, and the host's events (header from its feeds, proof from its broadcaster); box status: the status provider's messages (optional: left out on a host with none). Ingest a BEEF: proven, answered at once; unproven, recorded, broadcast, and answered on each state change (accepted, proven, rejected). docs/CHAIN.md."
+  "description": "The chain module (shruggr/skein#78, #79): the one writer of the instance's chain state — headers, transactions, proofs, spends, settlement, broadcasts — under chain/state; everyone else reads it by CID. Box chain: the host's events (header from its feeds, proof from its broadcaster: the `event` row, never a message), and {fn: ingest | status | proof, args} from the instance's own apps (the wallet, overlays: `$self`, by the host's loopback) and the owner; box status: the status provider's messages (optional: left out on a host with none). Ingest a BEEF: proven, answered at once; unproven, recorded, broadcast, and answered on each state change (accepted, proven, rejected). docs/CHAIN.md."
 }

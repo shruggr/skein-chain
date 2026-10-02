@@ -14,8 +14,9 @@ everyone else reads by CID. shruggr/skein#78. The contract is
 {fn: "proof",  args: {txid}}   where its proof is: block, height, depth, position
 ```
 
-and the host's events (headers, the broadcaster's proofs) and the status
-provider's messages.
+from the instance's own apps (`$self`: the wallet, the overlay apps) and
+the owner; and the host's events (headers, the broadcaster's proofs: the
+`event` row) and the status provider's messages.
 
 ## Layout
 

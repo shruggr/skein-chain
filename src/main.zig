@@ -5,7 +5,7 @@
 //!
 //! Stepped on:
 //!
-//!   box `chain`, a message {fn, args}     from a caller (the dispatch row's sender):
+//!   box `chain`, a message {fn, args}     from a caller the rows admit (#79: the instance's own apps, `$self`, and the owner):
 //!       ingest {beef}     record a BEEF. Proven (its BUMPs verify against our headers): answered at
 //!                         once. Unproven: recorded, broadcast (the event the host carries to its
 //!                         network), and the caller answered on each state change — accepted (the
@@ -69,6 +69,8 @@ const Step = struct {
     /// Transactions this thread rests on after the step.
     awaited: std.ArrayList([32]u8) = .empty,
     writes: bool = true,
+    /// A proof event's `via` (it came by a route's wiring, not the host's broadcaster).
+    via: ?[]const u8 = null,
 
     fn field(self: *Step, key: []const u8, v: Value) !void {
         try self.fields.append(self.a, .{ .key = key, .value = v });
@@ -127,7 +129,11 @@ fn run(a: Allocator) anyerror!void {
     // Every state change of a watched transaction: an answer to each watcher.
     for (p.st.changes.items) |ch| for (ch.watchers) |wv| {
         const w = shape.watcherOf(wv) orelse continue;
-        const result = try shape.txState(a, &p.st, ch.txid, @tagName(ch.state), ch.detail);
+        var result = try shape.txState(a, &p.st, ch.txid, @tagName(ch.state), ch.detail);
+        // A proof that came by a route's wiring (an overlay's `-proof` gossip): its watchers are told (`via`), so they do not publish it again.
+        if (ch.state == .proven) if (p.via) |v| {
+            result = .{ .map = try std.mem.concat(a, cbor.Entry, &.{ result.map, &.{.{ .key = "via", .value = .{ .text = v } }} }) };
+        };
         try p.answer(w.to, w.box, try shape.answerBody(a, "ingest", w.request, .{ .ok = result }));
     };
 
@@ -142,7 +148,8 @@ fn run(a: Allocator) anyerror!void {
         if (!contains(p.awaited.items, t)) try p.awaited.append(a, t);
     }
     var sent: u64 = 0;
-    for (p.answers.items) |x| if (try vm.reachable(a, x[0])) {
+    const me = if (in.get("self")) |sf| sf.getBytes("identity") else null;
+    for (p.answers.items) |x| if (try vm.reachable(a, x[0], me)) {
         _ = try vm.send(a, x[0], x[1], x[2]);
         sent += 1;
     };
@@ -192,6 +199,7 @@ fn onEvent(p: *Step, ev: Value) !void {
     } else if (eql(u8, kind, "proof")) {
         const txid = if (ev.getCid("subject")) |s| c.store.bitcoinHash(s) orelse return error.BadEvent else c.header.fromHex(ev.getText("txid") orelse return error.BadEvent) catch return error.BadEvent;
         try p.field("txid", try p.hex(txid));
+        p.via = ev.getText("via");
         const outcome = p.st.applyStatus(txid, "MINED", ev.getBytes("path") orelse return error.BadEvent) catch |e| switch (e) {
             error.UnknownTransaction => {
                 try p.field("outcome", .{ .text = "unknown" });

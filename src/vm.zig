@@ -93,8 +93,11 @@ pub fn keep(cid: []const u8) !void {
     if (sk.keep(cid.ptr, @intCast(cid.len)) < 0) return failed();
 }
 
-/// Whether the address book (the head `peers`) has an entry for `key`: an answer goes out only then.
-pub fn reachable(a: std.mem.Allocator, key: []const u8) !bool {
+/// Whether an answer to `key` can go out: the instance itself (`me`: one of its own apps — the
+/// wallet, an overlay — by the host's loopback, shruggr/skein#79), or an entry in the address book
+/// (the head `peers`). Either way the answer is in the log.
+pub fn reachable(a: std.mem.Allocator, key: []const u8, me: ?[]const u8) !bool {
+    if (me) |m| if (std.mem.eql(u8, m, key)) return true;
     const s = store();
     const root = (try head(a, "peers")) orelse return false;
     const list = (try s.getValue(a, root)).getArray("peers") orelse return false;

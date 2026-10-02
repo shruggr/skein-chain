@@ -72,8 +72,10 @@ timestamps, versions.
 
 ## Its interface
 
-One box, `chain` (the app's name), taking `{fn, args}` from anyone and the
-host's events; and `status`, the status provider's messages.
+One box, `chain` (the app's name), taking the host's events (its `event`
+row) and `{fn, args}` from the instance's own apps and the owner (shruggr/skein#79:
+its rows from `$self` and `$owner`, not an open box); and `status`, the
+status provider's messages.
 
 | fn | args | writes | answers |
 |---|---|---|---|
@@ -99,7 +101,10 @@ event `{event: "broadcast", tx: <its CID>, beef: <its Atomic BEEF>}`
 thread rests awaiting them, with a deadline at the earliest abandonment.
 
 The caller (the message's sender) is answered at its address, in the box
-it wrote to, as an app answers (docs/APPS.md §4):
+it wrote to, as an app answers (docs/APPS.md §4). A caller that is the
+instance itself — the wallet, an overlay — is answered by the same loopback
+it wrote by (shruggr/skein#79), and the answer steps the thread awaiting its
+`ingest` message:
 
 ```
 {fn, request: <the request message's CID>, replyTo: <the same>, result: {txid, tx: <CID>, state, …}}
@@ -108,7 +113,7 @@ it wrote to, as an app answers (docs/APPS.md §4):
 
 | state | when | result also carries |
 |---|---|---|
-| `proven` | at once, for a transaction that arrives proven (or is proven already); later, when its proof arrives | `block` (the header's CID), `height` |
+| `proven` | at once, for a transaction that arrives proven (or is proven already); later, when its proof arrives | `block` (the header's CID), `height`; `via` when the proof event came by a route's wiring (an overlay's `-proof` gossip: the watcher does not publish it again) |
 | `accepted` | the first status from the status provider that is not a rejection (RECEIVED, SEEN_ON_NETWORK, …); at once for a second ingest of a transaction already accepted | `txStatus`, `broadcast` (the broadcast record's CID) |
 | `rejected` | a rejecting status (REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED), a competing spend proven, something it spends rejected, abandonment; at once if it is rejected already | `reason`, `settlement` (the settlement record's CID) |
 
@@ -136,8 +141,10 @@ answers come later, at an address.
 - `{kind: "header", raw}` or `{kind: "header", raws: [...]}` (a run, parents
   first) in box `chain` — the host's header feeds (their default box is
   `chain`);
-- `{kind: "proof", subject: <tx CID>, txid, path, …}` — the broadcaster's
-  proof: to the thread awaiting the transaction, else box `chain`.
+- `{kind: "proof", subject: <tx CID>, txid, path, via?, …}` — the
+  broadcaster's proof, or an overlay route's (`via`: its `-proof` gossip,
+  checked against this instance's headers): to the thread awaiting the
+  transaction, else box `chain`.
 
 **The status provider's messages** (box `status`, signed by the provider,
 `subject` the transaction): `{kind: "status", txid, txStatus, …}` — to the
@@ -145,9 +152,9 @@ thread awaiting the transaction, else this app's `status` row. Statuses
 are optional: without a provider a transaction is proven by its proof,
 rejected by a competing proof or abandonment, and never `accepted`.
 
-The chain app is the only thing that emits the broadcast event in an
-instance that has it. (Until shruggr/skein#79, the stock wallet program and
-the pinned overlay engine still broadcast and take proofs of their own.)
+The chain app is the only thing that emits the broadcast event. The
+wallet and the overlay apps (shruggr/skein#79) neither broadcast nor take
+headers, proofs or statuses: they send `ingest` and wait on the answers.
 
 ## The manifest
 
@@ -157,13 +164,19 @@ the pinned overlay engine still broadcast and take proofs of their own.)
 "programs": {"chain": "bin/chain.wasm"},
 "config":   {"chain": {}},
 "dispatch": [
-  {"address": "chain",  "sender": "*",       "program": "chain"},
+  {"address": "chain",  "sender": "event",   "program": "chain"},
+  {"address": "chain",  "sender": "$self",   "program": "chain"},
+  {"address": "chain",  "sender": "$owner",  "program": "chain"},
   {"address": "status", "sender": "$status", "program": "chain", "optional": true}
 ]
 ```
 
-- the `chain` row from anyone: the callers and the host's events (an event
-  has no sender, so only a row from anyone takes it);
+- the `chain` row from `event`: the host's events (a feed's header, the
+  broadcaster's proof) — specific wiring, never a message (skein's dispatch
+  sender `event`, #79);
+- the `chain` rows from `$self` (the instance's own apps, by the host's
+  loopback: the wallet, the overlay apps — any program of the instance
+  emits as the instance) and `$owner`: the callers;
 - the `status` row from the instance's status provider; `optional`: left
   out by the install on a host with none (skein's install, #78).
 
@@ -174,7 +187,7 @@ else `defaults.walletAbandonMs`, else a day; 0: never).
 
 Its writes are heads under its name (skein's write-scope rule, #77):
 `chain/state`. Wired at boot by a system tree instead (`bin/chain.wasm`
-and the two rows in `etc/dispatch.json`), its program is named `chain` and
+and the rows in `etc/dispatch.json`), its program is named `chain` and
 the stock genesis scope `chain: ["chain/"]` lets it write the same head.
 
 ## Install
@@ -183,5 +196,6 @@ the stock genesis scope `chain: ["chain/"]` lets it write the same head.
 skein-host install https://github.com/shruggr/skein-chain --instance <handle> --approve-all
 ```
 
-The prompt reads the rows aloud: `row mailbox chain from anyone → chain`,
-`row mailbox status from $status (…) → chain`.
+The prompt reads the rows aloud: `row mailbox chain from event → chain`,
+`row mailbox chain from $self → chain`, `row mailbox chain from $owner →
+chain`, `row mailbox status from $status → chain`.
