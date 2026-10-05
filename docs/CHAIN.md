@@ -80,7 +80,7 @@ status provider's messages.
 
 | fn | args | writes | answers |
 |---|---|---|---|
-| `ingest` | `{beef}` (bytes, or hex) | yes | proven in: at once; unproven in: on each state change |
+| `ingest` | `{beef}`: a BEEF pointer record's CID (skein #121), or bytes, or hex | yes | proven in: at once; unproven in: on each state change |
 | `status` | `{txid}` (hex, display order) | no | at once |
 | `proof` | `{txid}` | no | at once |
 
@@ -88,7 +88,18 @@ status provider's messages.
 form; the interface is `chain/1`) are the same functions; the answer
 echoes `fn` as sent.
 
-**Ingest a BEEF** (V1, V2 or Atomic; its subject the atomic txid, else its
+**A BEEF comes in as its pointer record** (shruggr/skein#121). The rows
+that take callers' messages (`chain` from `$self` and from `$owner`) name
+`filter: "beef"`: the kernel's door, before the message's entry is
+written, decodes every BEEF in its body's fields, stores each transaction
+once as its `bitcoin-tx` block and each BUMP as the raw block of its bytes,
+checks every BUMP against the headers in `chain/state`, and puts the
+pointer record's CID where the bytes were (a bad BUMP: the message is a
+refusal entry and nothing runs). `ingest` reads the BEEF back with the
+SDK's `chain.record.beefOf` (the exact bytes) and ingests it as below; bytes
+or hex still work from a caller no door stands in front of.
+
+**Ingest a BEEF** (V1, V2, Atomic or Outpoint; its subject the atomic or outpoint txid, else its
 last transaction). SPV against this instance's chain: every BUMP's root is
 the header's merkle root at its height (an unknown height fails the
 ingest — feed the headers first); every transaction is in its BUMP, or

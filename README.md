@@ -124,7 +124,7 @@ at a pinned commit.
 | | |
 |---|---|
 | this app | 0.2.0 (tag `v0.2.0`) |
-| skein-sdk | v0.4.0, by tag tarball and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
+| skein-sdk | v0.4.0 + `chain.record` (shruggr/skein#121): its branch `beef-as-cid` at commit 0b99828, by commit tarball and hash in `build.zig.zon`, until it is tagged (module `chain`; bsvz comes through it) |
 | skein | log format 8; skein's equivs pin this repo by commit |
 
 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows

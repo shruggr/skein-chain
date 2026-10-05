@@ -6,7 +6,7 @@
 //! Stepped on:
 //!
 //!   box `chain`, a message {fn, args}     from a caller the rows admit (#79: the instance's own apps, `$self`, and the owner):
-//!       ingest {beef}     record a BEEF. Proven (its BUMPs verify against our headers): answered at
+//!       ingest {beef}     record a BEEF: the pointer record's CID the kernel's door wrote (skein #121), or bytes. Proven (its BUMPs verify against our headers): answered at
 //!                         once. Unproven: recorded, broadcast (the event the host carries to its
 //!                         network), and the caller answered on each state change — accepted (the
 //!                         first status that is not a rejection), proven, rejected — at its
@@ -266,7 +266,12 @@ fn callOf(p: *Step, name: []const u8, fargs: Value, sender: ?[]const u8, box: []
             return if (try shape.proofOf(a, &p.st, txid)) |v| .{ .ok = v } else .{ .err = .{ .code = "failed", .message = "not proven" } };
         },
         .ingest => {
-            const beef = (try shape.beefArg(a, fargs)) orelse return .{ .err = .{ .code = "bad-args", .message = "args.beef: want a BEEF (bytes, or hex)" } };
+            // shruggr/skein#121: a BEEF comes in as the pointer record the kernel's door wrote (its CID; the
+            // transactions and BUMPs are blocks in the store), or as bytes / hex from a caller with no door.
+            const beef = if (fargs.getCid("beef")) |rc|
+                c.record.beefOf(a, vm.store(), rc) catch |e| return .{ .err = .{ .code = "bad-args", .message = try std.fmt.allocPrint(a, "args.beef: not a BEEF pointer record held here ({s})", .{@errorName(e)}) } }
+            else
+                (try shape.beefArg(a, fargs)) orelse return .{ .err = .{ .code = "bad-args", .message = "args.beef: want a BEEF pointer record's CID, or a BEEF (bytes, or hex)" } };
             const got = p.st.ingest(beef) catch |e| switch (e) {
                 error.OutOfMemory => return e,
                 else => return .{ .err = .{ .code = "failed", .message = try std.fmt.allocPrint(a, "ingest: {s}", .{@errorName(e)}) } },
