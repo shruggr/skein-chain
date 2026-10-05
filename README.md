@@ -4,7 +4,7 @@ The chain app for a [skein](https://github.com/shruggr/skein): the one
 writer of an instance's chain state (headers, transactions, proofs, spends,
 settlement, broadcasts) under the head `chain/state`, which every other app
 reads by CID. It is the only thing on an instance that broadcasts. Version
-**0.3.1**.
+**0.3.2**.
 
 ## What it is
 
@@ -95,7 +95,7 @@ Zig 0.16.0 (`mise.toml`).
 ```
 zig build          # zig-out/bin/chain.wasm
 zig build bin      # the same into bin/chain.wasm (commit it; the build is reproducible)
-zig build test     # src/shape.zig natively
+zig build test     # src/shape.zig natively, over a chain state in memory
 ```
 
 With a local SDK checkout: `zig build --fork=../skein-sdk`. The flow through
@@ -123,11 +123,11 @@ at a pinned commit.
 
 | | |
 |---|---|
-| this app | 0.3.1 (tag `v0.3.1`) |
-| skein-sdk | v0.5.0, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
+| this app | 0.3.2 (tag `v0.3.2`) |
+| skein-sdk | v0.7.1, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
 | skein | log format 8; skein's equivs pin this repo by commit |
 
-0.3.1: the status provider's box is `chain/status` (the manifest still writes `"status"`; skein resolves a box under the app's name, shruggr/skein#128). 0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
+0.3.2: a proof after a reorg is answered to the same watchers as the first, with its `block` (#2; skein-sdk v0.7.1 keeps a proven transaction's watchers; the app uses only the SDK's `chain` module, so 0.7.0's `sk` changes — intentions, `authfetch`, no `provider(role)` — touch nothing here). 0.3.1: the status provider's box is `chain/status` (the manifest still writes `"status"`; skein resolves a box under the app's name, shruggr/skein#128). 0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
 (shruggr/skein#79); 0.1.0 was the first release (shruggr/skein#78).
 
 ## Contributing

@@ -31,7 +31,7 @@ The head `chain/state` (`<app>/state`; the app record is `chain/app`):
 | `headers` | height (u32 BE) → header (`bitcoin-block` link) | the best chain, anchored at the network's genesis header |
 | `heights` | block hash → height | the best chain, backwards |
 | `txs` | txid → transaction (`bitcoin-tx` link) | every transaction ingested; each kept, so its inputs are the kernel's `spends` edges (#42) |
-| `proofs` | txid → `{block, depth, position}` | its block's header (a link) and its leaf; the merkle nodes are 64-byte `bitcoin-tx` blocks under the header's root (a BUMP is rebuilt by descent: `merkle.pathFor`) |
+| `proofs` | txid → `{block, depth, position, broadcast?}` | its block's header (a link) and its leaf; `broadcast`: the broadcast record its proof settled (a link: its watchers, for a reorg); the merkle nodes are 64-byte `bitcoin-tx` blocks under the header's root (a BUMP is rebuilt by descent: `merkle.pathFor`) |
 | `proofHeights` | height ‖ txid → null | what a reorg reverts |
 | `rejected` | txid → settlement record | `{kind: "settlement", txid, status: "rejected", reason, at, cause?}` |
 | `unproven` | txid → null | derived: held, neither proven on the best chain nor rejected |
@@ -52,7 +52,8 @@ transaction is in `unproven` only while `broadcasts` holds its record:
 `since` is its first broadcast; `accepted` is set by
 the first status that is not a rejection; `path` is a proof that came
 before its header (tried again when headers arrive); `watchers` are the
-callers answered on each state change. Proven or rejected, the record goes.
+callers answered on each state change. Proven or rejected, the record goes
+(proven, its `proofs` entry links it, so its watchers outlast it).
 
 Status is computed from the records: **rejected** (a settlement record),
 **proven** (its proof's block is on the best chain), else **unproven**. A
@@ -63,7 +64,12 @@ every other held transaction spending one of the same outputs
 prove stays known and unproven for as long as it is held, and the threads
 of its watchers keep waiting. A proven transaction is never rejected.
 A reorg that replaces the block a proof names turns the transaction back to
-unproven: its broadcast is registered again and it is broadcast again.
+unproven: its broadcast is registered again, with the watchers of the
+broadcast its first proof settled (the `proofs` entry's `broadcast` link),
+and it is broadcast again. A reorg is another proof for the same
+transaction, a different block (shruggr/skein#112): when it is proven
+again, those watchers are answered `proven` again, at the same request,
+with the new `block` and `height`. The reorg itself answers nothing.
 
 The chain tracker's rules are the SDK's (`chain/src/chain.zig`): every
 header must chain back to the network's genesis header; usable target,
@@ -127,7 +133,7 @@ it wrote by (shruggr/skein#79), and the answer steps the thread awaiting its
 
 | state | when | result also carries |
 |---|---|---|
-| `proven` | at once, for a transaction that arrives proven (or is proven already); later, when its proof arrives | `block` (the header's CID), `height`; `via` when the proof event came by a route's wiring (an overlay's `-proof` gossip: the watcher does not publish it again) |
+| `proven` | at once, for a transaction that arrives proven (or is proven already); later, when its proof arrives; again after a reorg, when it is proven in another block (each proof one answer, to the same watchers) | `block` (the header's CID), `height`; `via` when the proof event came by a route's wiring (an overlay's `-proof` gossip: the watcher does not publish it again) |
 | `accepted` | the first status from the status provider that is not a rejection (RECEIVED, SEEN_ON_NETWORK, …); at once for a second ingest of a transaction already accepted | `txStatus`, `broadcast` (the broadcast record's CID) |
 | `rejected` | a rejecting status (REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED), a competing spend proven, something it spends rejected; at once if it is rejected already | `reason`, `settlement` (the settlement record's CID) |
 

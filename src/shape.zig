@@ -166,3 +166,24 @@ pub const Watcher = struct { to: []const u8, box: []const u8, request: []const u
 pub fn watcherOf(v: Value) ?Watcher {
     return .{ .to = v.getBytes("to") orelse return null, .box = v.getText("box") orelse return null, .request = v.getCid("request") orelse return null };
 }
+
+/// An answer to a watcher: who, which box, the `ingest` answer body.
+pub const Answer = struct { to: []const u8, box: []const u8, body: Value };
+
+/// Every state change of a watched transaction this step (`st.changes`): an `ingest` answer to each of
+/// its watchers, at the request they watched by. A proof after a reorg is another change: the watchers
+/// of the first proof (kept by the chain state, skein-sdk 0.7.1) are answered again, with the new
+/// `block`. `via`: a proof that came by a route's wiring (an overlay's `-proof` gossip) — its watchers
+/// are told, so they do not publish it again.
+pub fn changeAnswers(a: Allocator, st: *State, via: ?[]const u8) ![]Answer {
+    var out: std.ArrayList(Answer) = .empty;
+    for (st.changes.items) |ch| for (ch.watchers) |wv| {
+        const w = watcherOf(wv) orelse continue;
+        var result = try txState(a, st, ch.txid, @tagName(ch.state), ch.detail);
+        if (ch.state == .proven) if (via) |v| {
+            result = .{ .map = try std.mem.concat(a, cbor.Entry, &.{ result.map, &.{.{ .key = "via", .value = .{ .text = v } }} }) };
+        };
+        try out.append(a, .{ .to = w.to, .box = w.box, .body = try answerBody(a, "ingest", w.request, .{ .ok = result }) });
+    };
+    return out.items;
+}

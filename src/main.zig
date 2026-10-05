@@ -126,16 +126,8 @@ fn run(a: Allocator) anyerror!void {
 
     // A reorg this step turned proven transactions back to unproven: registered again, broadcast again.
     for (p.st.reverted.items) |t| if (!contains(p.to_broadcast.items, t)) try p.to_broadcast.append(a, t);
-    // Every state change of a watched transaction: an answer to each watcher.
-    for (p.st.changes.items) |ch| for (ch.watchers) |wv| {
-        const w = shape.watcherOf(wv) orelse continue;
-        var result = try shape.txState(a, &p.st, ch.txid, @tagName(ch.state), ch.detail);
-        // A proof that came by a route's wiring (an overlay's `-proof` gossip): its watchers are told (`via`), so they do not publish it again.
-        if (ch.state == .proven) if (p.via) |v| {
-            result = .{ .map = try std.mem.concat(a, cbor.Entry, &.{ result.map, &.{.{ .key = "via", .value = .{ .text = v } }} }) };
-        };
-        try p.answer(w.to, w.box, try shape.answerBody(a, "ingest", w.request, .{ .ok = result }));
-    };
+    // Every state change of a watched transaction: an answer to each watcher (a proof after a reorg: again).
+    for (try shape.changeAnswers(a, &p.st, p.via)) |x| try p.answer(x.to, x.box, x.body);
 
     var new_state: ?[]const u8 = state;
     if (p.writes) {
