@@ -1,4 +1,4 @@
-# The chain app (0.2.0)
+# The chain app (0.3.0)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an

@@ -4,7 +4,7 @@ The chain app for a [skein](https://github.com/shruggr/skein): the one
 writer of an instance's chain state (headers, transactions, proofs, spends,
 settlement, broadcasts) under the head `chain/state`, which every other app
 reads by CID. It is the only thing on an instance that broadcasts. Version
-**0.2.0**.
+**0.3.0**.
 
 ## What it is
 
@@ -123,11 +123,11 @@ at a pinned commit.
 
 | | |
 |---|---|
-| this app | 0.2.0 (tag `v0.2.0`) |
-| skein-sdk | v0.4.0 + `chain.record` (shruggr/skein#121): its branch `beef-as-cid` at commit 0b99828, by commit tarball and hash in `build.zig.zon`, until it is tagged (module `chain`; bsvz comes through it) |
+| this app | 0.3.0 (tag `v0.3.0`) |
+| skein-sdk | v0.5.0, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
 | skein | log format 8; skein's equivs pin this repo by commit |
 
-0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
+0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
 (shruggr/skein#79); 0.1.0 was the first release (shruggr/skein#78).
 
 ## Contributing
