@@ -17,7 +17,7 @@
 //!   box `chain`, an event (no sender)    the host's wiring: `header` ({raw} or {raws}, a run, parents
 //!                                        first) from its feeds; `proof` ({subject, txid, path, …}) from
 //!                                        its broadcaster, for a transaction no thread awaits
-//!   box `status`, a message              a status provider's ({kind: "status", txid, txStatus, …},
+//!   box `chain/status`, a message        a status provider's ({kind: "status", txid, txStatus, …},
 //!                                        about its subject), for a transaction no thread awaits
 //!   a thread resting after a broadcast   its transactions' proofs (input `event`), statuses (input
 //!                                        `message`); it has no deadline of its own
@@ -114,7 +114,7 @@ fn run(a: Allocator) anyerror!void {
         for (prior) |t| if ((try p.st.broadcastRecord(t)) != null) try p.awaited.append(a, t);
     } else if (args.getCid("event")) |ec| {
         try onEvent(&p, try s.getValue(a, ec));
-    } else if (eql(u8, args.getText("box") orelse "", "status") and args.getCid("body") != null) {
+    } else if (eql(u8, args.getText("box") orelse "", "chain/status") and args.getCid("body") != null) {
         op = "status";
         const body = try s.getValue(a, args.getCid("body").?);
         const txid = c.header.fromHex(body.getText("txid") orelse return error.BadEvent) catch return error.BadEvent;

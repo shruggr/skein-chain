@@ -4,7 +4,7 @@ The chain app for a [skein](https://github.com/shruggr/skein): the one
 writer of an instance's chain state (headers, transactions, proofs, spends,
 settlement, broadcasts) under the head `chain/state`, which every other app
 reads by CID. It is the only thing on an instance that broadcasts. Version
-**0.3.0**.
+**0.3.1**.
 
 ## What it is
 
@@ -25,7 +25,7 @@ Its dispatch rows (`etc/app.json`):
 | `chain` | `event` | the host's events: a header from a feed, a proof from the broadcaster. Events only, never a message |
 | `chain` | `$self` | calls from the instance's own apps (the wallet, overlays), by the host's loopback |
 | `chain` | `$owner` | calls from the owner |
-| `status` | `$status` | the status provider's messages; `optional`: left out on a host with no status provider |
+| `chain/status` (written `"status"`, shruggr/skein#128) | `$status` | the status provider's messages; `optional`: left out on a host with no status provider |
 
 Calls hand back CIDs, not data. The wallet and the overlay apps never
 broadcast and never take headers, proofs or statuses: they send `ingest` to
@@ -123,11 +123,11 @@ at a pinned commit.
 
 | | |
 |---|---|
-| this app | 0.3.0 (tag `v0.3.0`) |
+| this app | 0.3.1 (tag `v0.3.1`) |
 | skein-sdk | v0.5.0, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
 | skein | log format 8; skein's equivs pin this repo by commit |
 
-0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
+0.3.1: the status provider's box is `chain/status` (the manifest still writes `"status"`; skein resolves a box under the app's name, shruggr/skein#128). 0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
 (shruggr/skein#79); 0.1.0 was the first release (shruggr/skein#78).
 
 ## Contributing

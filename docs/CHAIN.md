@@ -1,4 +1,4 @@
-# The chain app (0.3.0)
+# The chain app (0.3.1)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an
@@ -75,8 +75,9 @@ timestamps, versions.
 
 One box, `chain` (the app's name), taking the host's events (its `event`
 row) and `{fn, args}` from the instance's own apps and the owner (shruggr/skein#79:
-its rows from `$self` and `$owner`, not an open box); and `status`, the
-status provider's messages.
+its rows from `$self` and `$owner`, not an open box); and `chain/status`
+(written `"status"`: a manifest's box is relative to the app, shruggr/skein#128),
+the status provider's messages.
 
 | fn | args | writes | answers |
 |---|---|---|---|
@@ -159,7 +160,7 @@ answers come later, at an address.
   checked against this instance's headers): to the thread awaiting the
   transaction, else box `chain`.
 
-**The status provider's messages** (box `status`, signed by the provider,
+**The status provider's messages** (box `chain/status`, signed by the provider,
 `subject` the transaction): `{kind: "status", txid, txStatus, …}` — to the
 thread awaiting the transaction, else this app's `status` row. Statuses
 are optional: without a provider a transaction is proven by its proof,
@@ -228,4 +229,4 @@ skein-host install https://github.com/shruggr/skein-chain --instance <handle> --
 
 The prompt reads the rows aloud: `row mailbox chain from event → chain`,
 `row mailbox chain from $self → chain`, `row mailbox chain from $owner →
-chain`, `row mailbox status from $status → chain`.
+chain`, `row mailbox chain/status from $status → chain`.
