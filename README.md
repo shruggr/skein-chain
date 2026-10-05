@@ -49,7 +49,23 @@ skein-host install https://github.com/shruggr/skein-chain --instance <handle>
 ```
 
 The install reads the rows aloud and asks; `--approve-all` skips the
-question. Then, from a program of the same instance (Zig, over the SDK):
+question.
+
+What the host must provide:
+
+- **A headers feed** (the host's `SKEIN_HEADERS_URL`). Without headers the
+  app proves nothing: there is nothing to check a BUMP against.
+- **A broadcaster** (the host's `SKEIN_ARC_URL`, its `status` provider).
+  Without one, an unproven transaction is not broadcast and its status is
+  not followed. An install on a host with no status provider leaves the
+  `$status` row out and says so in the install prompt.
+
+Arcade is one channel, not the only one. A transaction handed to someone
+else (a payment) is broadcast by them and held here as spent but unproven;
+its proof may arrive later in a BEEF someone sends. An unproven transaction
+only has to resolve when it is referenced again.
+
+Then, from a program of the same instance (Zig, over the SDK):
 
 ```zig
 // me: the instance's own key (the step input's `self.identity`).
