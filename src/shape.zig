@@ -10,37 +10,30 @@ const State = c.state.State;
 const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
-pub const default_abandon_ms: i64 = 86_400_000;
-
 /// What the app runs with.
 pub const Config = struct {
     /// The app's name: its box, and the prefix of its heads (`<app>/app`, `<app>/state`).
     app: []const u8 = "chain",
     network: c.chain.Network = .main,
-    /// A registered broadcast still unproven this long after it was first broadcast is abandoned (0: never).
-    abandon_ms: i64 = default_abandon_ms,
 
     pub fn stateHead(self: Config, a: Allocator) ![]const u8 {
         return std.fmt.allocPrint(a, "{s}/state", .{self.app});
     }
 };
 
-/// The configuration: `config.chain` of the app record (`network`: "main" | "test" | "regtest";
-/// `abandonMs`: an integer) where it says, else the genesis defaults (`walletNetwork`,
-/// `walletAbandonMs`, text), else mainnet and a day. `app`: the name the program record names (null:
+/// The configuration: `config.chain` of the app record (`network`: "main" | "test" | "regtest")
+/// where it says, else the genesis default `walletNetwork`, else mainnet. `app`: the name the program record names (null:
 /// a genesis-wired program — "chain").
 pub fn configOf(app: ?[]const u8, record: ?Value, defaults: ?Value) !Config {
     var conf = Config{};
     if (app) |n| conf.app = n;
     if (defaults) |d| {
         if (d.getText("walletNetwork")) |n| conf.network = c.chain.Network.parse(n) orelse return error.BadConfig;
-        if (d.getText("walletAbandonMs")) |ms| conf.abandon_ms = std.fmt.parseInt(i64, ms, 10) catch return error.BadConfig;
     }
     const ch = if (record) |r| (if (r.get("config")) |x| x.get("chain") else null) else null;
     if (ch) |x| {
         if (x != .map) return error.BadConfig;
         if (x.get("network")) |n| conf.network = c.chain.Network.parse(if (n == .text) n.text else return error.BadConfig) orelse return error.BadConfig;
-        if (x.get("abandonMs")) |ms| conf.abandon_ms = if (ms == .uint) @intCast(ms.uint) else return error.BadConfig;
     }
     return conf;
 }

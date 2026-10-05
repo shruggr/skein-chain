@@ -13,23 +13,20 @@ fn map(a: std.mem.Allocator, es: []const cbor.Entry) !Value {
     return .{ .map = try a.dupe(cbor.Entry, es) };
 }
 
-test "configuration: the app record's config.chain, else the genesis defaults, else mainnet and a day" {
+test "configuration: the app record's config.chain, else the genesis defaults, else mainnet" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var conf = try shape.configOf(null, null, null);
     try std.testing.expectEqualStrings("chain", conf.app);
     try std.testing.expectEqual(c.chain.Network.main, conf.network);
-    try std.testing.expectEqual(shape.default_abandon_ms, conf.abandon_ms);
     try std.testing.expectEqualStrings("chain/state", try conf.stateHead(a));
-    const defaults = try map(a, &.{ .{ .key = "walletNetwork", .value = .{ .text = "regtest" } }, .{ .key = "walletAbandonMs", .value = .{ .text = "600000" } } });
+    const defaults = try map(a, &.{.{ .key = "walletNetwork", .value = .{ .text = "regtest" } }});
     conf = try shape.configOf("chain", null, defaults);
     try std.testing.expectEqual(c.chain.Network.regtest, conf.network);
-    try std.testing.expectEqual(@as(i64, 600_000), conf.abandon_ms);
-    const record = try map(a, &.{.{ .key = "config", .value = try map(a, &.{.{ .key = "chain", .value = try map(a, &.{ .{ .key = "network", .value = .{ .text = "test" } }, .{ .key = "abandonMs", .value = .{ .uint = 5 } } }) }}) }});
+    const record = try map(a, &.{.{ .key = "config", .value = try map(a, &.{.{ .key = "chain", .value = try map(a, &.{.{ .key = "network", .value = .{ .text = "test" } }}) }}) }});
     conf = try shape.configOf("mychain", record, defaults);
     try std.testing.expectEqual(c.chain.Network.@"test", conf.network);
-    try std.testing.expectEqual(@as(i64, 5), conf.abandon_ms);
     try std.testing.expectEqualStrings("mychain/state", try conf.stateHead(a));
     const bad = try map(a, &.{.{ .key = "config", .value = try map(a, &.{.{ .key = "chain", .value = try map(a, &.{.{ .key = "network", .value = .{ .text = "moon" } }}) }}) }});
     try std.testing.expectError(error.BadConfig, shape.configOf("chain", bad, null));

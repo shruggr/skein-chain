@@ -49,7 +49,7 @@ transaction is in `unproven` only while `broadcasts` holds its record:
  accepted?: true, path?: bytes, watchers: [{to: bytes(33), box, request: <message CID>}]}
 ```
 
-`since` is its first broadcast (the abandonment clock); `accepted` is set by
+`since` is its first broadcast; `accepted` is set by
 the first status that is not a rejection; `path` is a proof that came
 before its header (tried again when headers arrive); `watchers` are the
 callers answered on each state change. Proven or rejected, the record goes.
@@ -59,8 +59,9 @@ Status is computed from the records: **rejected** (a settlement record),
 rejection walks the held transactions that spend it (the `spends` edges)
 and rejects them too (`input-rejected`, `cause` the first); a proof rejects
 every other held transaction spending one of the same outputs
-(`double-spent`); a registered broadcast still unproven `abandonMs` after
-`since` is rejected (`abandoned`). A proven transaction is never rejected.
+(`double-spent`). Nothing else rejects: a transaction the chain app cannot
+prove stays known and unproven for as long as it is held, and the threads
+of its watchers keep waiting. A proven transaction is never rejected.
 A reorg that replaces the block a proof names turns the transaction back to
 unproven: its broadcast is registered again and it is broadcast again.
 
@@ -98,7 +99,8 @@ output a proven held one spends is rejected at once (`double-spent`); each
 one left unproven registers its broadcast and is **broadcast** — the
 event `{event: "broadcast", tx: <its CID>, beef: <its Atomic BEEF>}`
 (skein docs/MESSAGES.md), which the host carries to its network — and the
-thread rests awaiting them, with a deadline at the earliest abandonment.
+thread rests awaiting them, with no deadline; after each step it rests
+again on those still unproven.
 
 The caller (the message's sender) is answered at its address, in the box
 it wrote to, as an app answers (docs/APPS.md §4). A caller that is the
@@ -115,7 +117,7 @@ it wrote by (shruggr/skein#79), and the answer steps the thread awaiting its
 |---|---|---|
 | `proven` | at once, for a transaction that arrives proven (or is proven already); later, when its proof arrives | `block` (the header's CID), `height`; `via` when the proof event came by a route's wiring (an overlay's `-proof` gossip: the watcher does not publish it again) |
 | `accepted` | the first status from the status provider that is not a rejection (RECEIVED, SEEN_ON_NETWORK, …); at once for a second ingest of a transaction already accepted | `txStatus`, `broadcast` (the broadcast record's CID) |
-| `rejected` | a rejecting status (REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED), a competing spend proven, something it spends rejected, abandonment; at once if it is rejected already | `reason`, `settlement` (the settlement record's CID) |
+| `rejected` | a rejecting status (REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED), a competing spend proven, something it spends rejected; at once if it is rejected already | `reason`, `settlement` (the settlement record's CID) |
 
 So an unproven transaction's caller gets several answers to one request,
 `accepted` then `proven` (or `rejected`), each a message with the same
@@ -150,7 +152,7 @@ answers come later, at an address.
 `subject` the transaction): `{kind: "status", txid, txStatus, …}` — to the
 thread awaiting the transaction, else this app's `status` row. Statuses
 are optional: without a provider a transaction is proven by its proof,
-rejected by a competing proof or abandonment, and never `accepted`.
+rejected by a competing proof, and never `accepted`.
 
 The chain app is the only thing that emits the broadcast event. The
 wallet and the overlay apps (shruggr/skein#79) neither broadcast nor take
@@ -200,8 +202,7 @@ its transaction is `proven` or `rejected`, and its registration ends there
 
 `config.chain` (read from the app record at every step; the genesis
 defaults where it says nothing): `network` (`main` | `test` | `regtest`;
-else `defaults.walletNetwork`, else `main`) and `abandonMs` (an integer;
-else `defaults.walletAbandonMs`, else a day; 0: never).
+else `defaults.walletNetwork`, else `main`).
 
 Its writes are heads under its name (skein's write-scope rule, #77):
 `chain/state`. Wired at boot by a system tree instead (`bin/chain.wasm`

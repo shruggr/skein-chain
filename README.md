@@ -80,10 +80,9 @@ Readers that only need state read `head("chain/state")` and walk it with the
 SDK's `chain.state`.
 
 Configuration is `config.chain` in the manifest: `network` (`main`, `test`,
-`regtest`) and `abandonMs` (an unproven transaction still unproven that long
-after its first broadcast is rejected as `abandoned`; 0: never). Where it
-says nothing, the genesis defaults `walletNetwork` / `walletAbandonMs`
-apply, else `main` and one day.
+`regtest`). Where it says nothing, the genesis default `walletNetwork`
+applies, else `main`. The chain app never rejects a transaction on a clock
+of its own: one it cannot prove stays unproven for as long as it is held.
 
 An instance can also wire it at boot from a system tree: `bin/chain.wasm`
 plus the same four rows in `etc/dispatch.json`; the program named `chain`

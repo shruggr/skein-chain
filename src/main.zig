@@ -20,7 +20,7 @@
 //!   box `status`, a message              a status provider's ({kind: "status", txid, txStatus, …},
 //!                                        about its subject), for a transaction no thread awaits
 //!   a thread resting after a broadcast   its transactions' proofs (input `event`), statuses (input
-//!                                        `message`), or its deadline (`woke`: abandonment)
+//!                                        `message`); it has no deadline of its own
 //!
 //! Called (`kind: "call"`, an in-VM or kernel call): `status` and `proof`, the
 //! same answers as dag-cbor on stdout; they write nothing.
@@ -108,8 +108,8 @@ fn run(a: Allocator) anyerror!void {
             const subject = m.getCid("subject") orelse return error.BadInput;
             try onStatus(&p, c.store.bitcoinHash(subject) orelse return error.BadInput, body);
         } else {
+            // A thread resting with a deadline set before abandonment was removed (skein-chain#1): it rests again.
             try p.field("woke", .{ .boolean = true });
-            for (prior) |t| _ = try p.st.abandonIfDue(t, conf.abandon_ms);
         }
         for (prior) |t| if ((try p.st.broadcastRecord(t)) != null) try p.awaited.append(a, t);
     } else if (args.getCid("event")) |ec| {
@@ -153,18 +153,12 @@ fn run(a: Allocator) anyerror!void {
         _ = try vm.send(a, x[0], x[1], x[2]);
         sent += 1;
     };
-    var until: ?i64 = null;
     if (p.awaited.items.len > 0) {
         const hexes = try a.alloc(Value, p.awaited.items.len);
         for (p.awaited.items, hexes) |t, *h| {
             try vm.awaitRecord(&c.store.hashCid(.tx, t));
             h.* = try p.hex(t);
-            if (conf.abandon_ms > 0) if (try p.st.broadcastRecord(t)) |r| {
-                const at = @max(@as(i64, @intCast(r.getUint("since") orelse 0)) + conf.abandon_ms, p.st.now + 1);
-                until = if (until) |u| @min(u, at) else at;
-            };
         }
-        if (until) |u| try vm.deadline(u);
         try p.field("awaited", .{ .array = hexes });
     }
     var out: std.ArrayList(cbor.Entry) = .empty;
