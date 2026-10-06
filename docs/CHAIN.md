@@ -1,4 +1,4 @@
-# The chain app (0.3.1)
+# The chain app (0.4.0)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an
@@ -76,6 +76,39 @@ header must chain back to the network's genesis header; usable target,
 proof of work, links; a heavier branch replaces ours from the fork point.
 Not checked, by decision (#29 Q3): the difficulty-adjustment rule,
 timestamps, versions.
+
+### Born with the chain: the image's headers (shruggr/skein#132)
+
+A skein holds the whole header chain from genesis, and never asks for a
+header: headers are pushed. **The image a skein is born from carries the
+chain** (skein docs/BOOTSTRAP.md, "The image's chain part"): the host grows
+it with every header it receives, so a skein made at any moment has every
+header up to the host's tip in its tree:
+
+```
+chain/headers/<first>   raw 80-byte headers in height order, 2016 per block, <first> the first one's
+                        height in 8 digits (00000000, 00002016, …); every block but the last is full
+chain/tip               {"height": <n>, "hash": "<display hex>"}
+```
+
+**The chain app's first step on such an instance starts from it**: with no
+chain state yet, it reads the head `main` (the tree its genesis named, the
+image's) and, when that tree carries `chain/headers`, loads every header
+into the empty state before the step's own work (skein-sdk `chain.image`
+`load`): verified as a run from genesis is (the network's genesis header
+first, links, targets, proof of work; a first header that is not the
+configured network's genesis fails the step, `WrongNetwork`), each header
+put as its `bitcoin-block` block (not kept: a header has no edges), and the
+`headers` and `heights` maps built in one pass. The result record says so:
+`image: {headers, tip}`. From then on the tip events continue as before;
+the first one usually is that step's own. Replay loads the same: the tree
+is the genesis's, and nothing extra is in the log. A tree with no
+`chain/headers` (an instance from an older image, a system tree) starts
+empty, as before.
+
+On mainnet that first step loads about 970 000 headers: some 15 s, and the
+instance's store grows by about 330 MB (the headers as blocks and the two
+maps), beside the image's own 78 MB of header blocks.
 
 ## Its interface
 
@@ -160,7 +193,8 @@ answers come later, at an address.
 
 - `{kind: "header", raw}` or `{kind: "header", raws: [...]}` (a run, parents
   first) in box `chain` — the host's header feeds (their default box is
-  `chain`);
+  `chain`): the tip as it moves; the chain before the instance existed came
+  with its image (above);
 - `{kind: "proof", subject: <tx CID>, txid, path, via?, …}` — the
   broadcaster's proof, or an overlay route's (`via`: its `-proof` gossip,
   checked against this instance's headers): to the thread awaiting the

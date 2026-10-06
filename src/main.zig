@@ -25,8 +25,13 @@
 //! Called (`kind: "call"`, an in-VM or kernel call): `status` and `proof`, the
 //! same answers as dag-cbor on stdout; they write nothing.
 //!
+//! The first step on an instance whose tree (the head `main`: an image's,
+//! shruggr/skein#132) carries a header chain starts from it: every header
+//! from genesis to the image's tip, loaded into the empty state before the
+//! step's own work (skein-sdk `chain.image`); the tip events continue from there.
+//!
 //! Every step keeps a result record and prints its CID:
-//!   {kind: "chain-result", op, fn?, txid?, status?, error?, answered, broadcast, awaited?, state}
+//!   {kind: "chain-result", op, image?: {headers, tip}, fn?, txid?, status?, error?, answered, broadcast, awaited?, state}
 const std = @import("std");
 const c = @import("chain");
 const vm = @import("vm.zig");
@@ -92,6 +97,9 @@ fn run(a: Allocator) anyerror!void {
     const state = try vm.head(a, head_name);
     var p = Step{ .a = a, .conf = conf, .st = try State.load(a, s, state, conf.network) };
     p.st.now = @intCast(in.getUint("at") orelse return error.BadInput);
+    // shruggr/skein#132: the first step on an instance whose tree carries a header chain
+    // (`chain/headers`, the image's) starts from it — the whole chain from genesis.
+    const from_image = if (state == null) try loadImage(&p) else false;
     const args = in.get("args") orelse return error.BadInput;
     var op: []const u8 = "event";
 
@@ -130,7 +138,7 @@ fn run(a: Allocator) anyerror!void {
     for (try shape.changeAnswers(a, &p.st, p.via)) |x| try p.answer(x.to, x.box, x.body);
 
     var new_state: ?[]const u8 = state;
-    if (p.writes) {
+    if (p.writes or from_image) {
         new_state = try p.st.save();
         if (state == null or !eql(u8, state.?, new_state.?)) try vm.advance(head_name, new_state.?);
     }
@@ -166,6 +174,20 @@ fn run(a: Allocator) anyerror!void {
         .{ .key = "state", .value = if (new_state) |ns| .{ .cid = ns } else .null },
     });
     _ = try vm.finish(a, .{ .map = out.items });
+}
+
+/// An empty chain state filled from the header chain the instance's tree
+/// carries (skein-sdk `chain.image`: the head `main`, the tree its genesis
+/// named — the image's, so a replay loads the same): whether there was one.
+fn loadImage(p: *Step) !bool {
+    const root = (try vm.head(p.a, "main")) orelse return false;
+    if (root.len < 2 or root[1] != 0x78) return false; // not a git tree
+    const got = (try c.image.load(&p.st, root)) orelse return false;
+    try p.field("image", .{ .map = try p.a.dupe(cbor.Entry, &.{
+        .{ .key = "headers", .value = .{ .uint = got.headers } },
+        .{ .key = "tip", .value = .{ .uint = got.tip } },
+    }) });
+    return true;
 }
 
 /// A `header` or `proof` event (the host's feeds and broadcaster).
