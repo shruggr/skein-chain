@@ -5,7 +5,7 @@
 //!
 //! Stepped on:
 //!
-//!   box `chain`, a message {fn, args}     from a caller the rows admit (#79: the instance's own apps, `$self`, and the owner):
+//!   box `chain`, a message {fn, args}     from a caller the kernel admits (skein#143: an open route, filter kernel.beef — the instance's own apps, root):
 //!       ingest {beef}     record a BEEF: the pointer record's CID the kernel's door wrote (skein #121), or bytes. Proven (its BUMPs verify against our headers): answered at
 //!                         once. Unproven: recorded, broadcast (the event the host carries to its
 //!                         network), and the caller answered on each state change — accepted (the

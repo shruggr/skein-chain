@@ -230,27 +230,26 @@ its transaction is `proven` or `rejected`, and its registration ends there
 
 ## The manifest
 
-`etc/app.json` (the #77 shape):
+`etc/app.json` (shruggr/skein#143: routes, no senders):
 
 ```json
 "programs": {"chain": "bin/chain.wasm"},
 "config":   {"chain": {}},
-"dispatch": [
-  {"address": "chain",  "sender": "event",   "program": "chain"},
-  {"address": "chain",  "sender": "$self",   "program": "chain"},
-  {"address": "chain",  "sender": "$owner",  "program": "chain"},
-  {"address": "status", "sender": "$status", "program": "chain", "optional": true}
+"routes": [
+  {"transport": "event", "address": "chain", "handler": "chain"},
+  {"address": "chain", "filters": ["kernel.beef"], "handler": "chain"},
+  {"address": "status", "handler": "chain"}
 ]
 ```
 
-- the `chain` row from `event`: the host's events (a feed's header, the
-  broadcaster's proof) — specific wiring, never a message (skein's dispatch
-  sender `event`, #79);
-- the `chain` rows from `$self` (the instance's own apps, by the host's
-  loopback: the wallet, the overlay apps — any program of the instance
-  emits as the instance) and `$owner`: the callers;
-- the `status` row from the instance's status provider; `optional`: left
-  out by the install on a host with none (skein's install, #78).
+- the `event` route at `chain`: the host's events (a feed's header, the
+  broadcaster's proof) — specific wiring, never a message;
+- the mailbox route at `chain`: the callers (the instance's own apps by the
+  host's loopback — the wallet, the overlay apps — and root). Open: no
+  role gates its functions; the filter `kernel.beef` decodes an ingest's
+  BEEF at the kernel's door into its pointer record;
+- the mailbox route at `status` (`chain/status`): the status provider's
+  messages.
 
 `config.chain` (read from the app record at every step; the genesis
 defaults where it says nothing): `network` (`main` | `test` | `regtest`;
@@ -258,7 +257,7 @@ else `defaults.walletNetwork`, else `main`).
 
 Its writes are heads under its name (skein's write-scope rule, #77):
 `chain/state`. Wired at boot by a system tree instead (`bin/chain.wasm`
-and the rows in `etc/dispatch.json`), its program is named `chain` and
+and its routes), its program is named `chain` and
 the default scope for a program named `chain` (`chain: ["chain/"]`, skein `src/host/genesis.ts`) lets it write the same head.
 
 ## Install

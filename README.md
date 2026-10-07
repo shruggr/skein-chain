@@ -18,14 +18,13 @@ manifest). Its interface is `chain/1` on box `chain`:
 | `status` | `{txid}` | no | at once: `{txid, state, tx?, block?, height?, txStatus?, broadcast?, reason?, settlement?}` (CIDs) |
 | `proof` | `{txid}` | no | at once: `{txid, tx, block, height, depth, position}` |
 
-Its dispatch rows (`etc/app.json`):
+Its routes (`etc/app.json`, shruggr/skein#143):
 
-| box | sender | carries |
-|---|---|---|
-| `chain` | `event` | the host's events: a header from a feed, a proof from the broadcaster. Events only, never a message |
-| `chain` | `$self` | calls from the instance's own apps (the wallet, overlays), by the host's loopback |
-| `chain` | `$owner` | calls from the owner |
-| `chain/status` (written `"status"`, shruggr/skein#128) | `$status` | the status provider's messages; `optional`: left out on a host with no status provider |
+| transport | box | filters | carries |
+|---|---|---|---|
+| `event` | `chain` | — | the host's events: a header from a feed, a proof from the broadcaster. Events only, never a message |
+| `mailbox` | `chain` | `kernel.beef` | calls from anyone the kernel admits: the instance's own apps (the wallet, overlays) and root. Open (no role gates `ingest`, `status`, `proof`); `kernel.beef` hands `ingest` the BEEF's pointer record |
+| `mailbox` | `chain/status` (written `"status"`, shruggr/skein#128) | — | the status provider's messages |
 
 Calls hand back CIDs, not data. The wallet and the overlay apps never
 broadcast and never take headers, proofs or statuses: they send `ingest` to
@@ -89,7 +88,7 @@ applies, else `main`. The chain app never rejects a transaction on a clock
 of its own: one it cannot prove stays unproven for as long as it is held.
 
 An instance can also wire it at boot from a system tree: `bin/chain.wasm`
-plus the same four rows in `etc/dispatch.json`; the program named `chain`
+plus the same three routes; the program named `chain`
 writes `chain/…` (skein `docs/BOOTSTRAP.md`).
 
 ## Build and test

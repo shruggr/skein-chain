@@ -1,7 +1,7 @@
 {
   "kind": "app",
   "name": "chain",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "programs": {
     "chain": "bin/chain.wasm"
   },
@@ -14,28 +14,73 @@
       "functions": {
         "ingest": {
           "writes": true,
-          "args": {"beef": "any"},
-          "answer": {"txid": "string", "tx": "cid", "state": "string", "block?": "cid", "height?": "int", "txStatus?": "string", "reason?": "string", "settlement?": "cid", "broadcast?": "cid"}
+          "args": {
+            "beef": "any"
+          },
+          "answer": {
+            "txid": "string",
+            "tx": "cid",
+            "state": "string",
+            "block?": "cid",
+            "height?": "int",
+            "txStatus?": "string",
+            "reason?": "string",
+            "settlement?": "cid",
+            "broadcast?": "cid"
+          }
         },
         "status": {
           "writes": false,
-          "args": {"txid": "string"},
-          "answer": {"txid": "string", "tx?": "cid", "state": "string", "block?": "cid", "height?": "int", "txStatus?": "string", "reason?": "string", "settlement?": "cid", "broadcast?": "cid"}
+          "args": {
+            "txid": "string"
+          },
+          "answer": {
+            "txid": "string",
+            "tx?": "cid",
+            "state": "string",
+            "block?": "cid",
+            "height?": "int",
+            "txStatus?": "string",
+            "reason?": "string",
+            "settlement?": "cid",
+            "broadcast?": "cid"
+          }
         },
         "proof": {
           "writes": false,
-          "args": {"txid": "string"},
-          "answer": {"txid": "string", "tx": "cid", "block": "cid", "height": "int", "depth": "int", "position": "int"}
+          "args": {
+            "txid": "string"
+          },
+          "answer": {
+            "txid": "string",
+            "tx": "cid",
+            "block": "cid",
+            "height": "int",
+            "depth": "int",
+            "position": "int"
+          }
         }
       }
     }
   ],
   "requires": [],
-  "dispatch": [
-    {"address": "chain", "sender": "event", "program": "chain"},
-    {"address": "chain", "sender": "$self", "program": "chain", "filter": "beef"},
-    {"address": "chain", "sender": "$owner", "program": "chain", "filter": "beef"},
-    {"address": "status", "sender": "$status", "program": "chain", "optional": true}
-  ],
-  "description": "The chain module (shruggr/skein#78, #79): the one writer of the instance's chain state — headers, transactions, proofs, spends, settlement, broadcasts — under chain/state; everyone else reads it by CID. Box chain: the host's events (header from its feeds, proof from its broadcaster: the `event` row, never a message), and {fn: ingest | status | proof, args} from the instance's own apps (the wallet, overlays: `$self`, by the host's loopback) and the owner; box chain/status (written status: a box is relative to the app, shruggr/skein#128): the status provider's messages (optional: left out on a host with none). Ingest a BEEF (shruggr/skein#121: the callers' rows name the filter beef, so the kernel's door hands ingest the pointer record's CID — the transactions and BUMPs blocks in the store, every BUMP checked against chain/state — never the bytes): proven, answered at once; unproven, recorded, broadcast, and answered on each state change (accepted, proven, rejected). docs/CHAIN.md."
+  "description": "The chain module (shruggr/skein#78, #79): the one writer of the instance's chain state — headers, transactions, proofs, spends, settlement, broadcasts — under chain/state; everyone else reads it by CID. Box chain: the host's events (header from its feeds, proof from its broadcaster: the `event` row, never a message), and {fn: ingest | status | proof, args} from the instance's own apps (the wallet, overlays: `$self`, by the host's loopback) and the owner; box chain/status (written status: a box is relative to the app, shruggr/skein#128): the status provider's messages (optional: left out on a host with none). Ingest a BEEF (shruggr/skein#121: the callers' rows name the filter beef, so the kernel's door hands ingest the pointer record's CID — the transactions and BUMPs blocks in the store, every BUMP checked against chain/state — never the bytes): proven, answered at once; unproven, recorded, broadcast, and answered on each state change (accepted, proven, rejected). docs/CHAIN.md.",
+  "routes": [
+    {
+      "transport": "event",
+      "address": "chain",
+      "handler": "chain"
+    },
+    {
+      "address": "chain",
+      "filters": [
+        "kernel.beef"
+      ],
+      "handler": "chain"
+    },
+    {
+      "address": "status",
+      "handler": "chain"
+    }
+  ]
 }
