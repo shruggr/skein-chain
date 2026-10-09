@@ -1,4 +1,4 @@
-# The chain app (0.4.0)
+# The chain app (0.6.0)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an
@@ -134,12 +134,14 @@ that take callers' messages (`chain` from `$self` and from `$owner`) name
 written, decodes every BEEF in its body's fields, stores each transaction
 once as its `bitcoin-tx` block and each BUMP as the raw block of its bytes,
 checks every BUMP against the headers in `chain/state`, and puts the
-pointer record's CID where the bytes were (a bad BUMP: the message is a
-refusal entry and nothing runs). `ingest` reads the BEEF back with the
-SDK's `chain.record.beefOf` (the exact bytes) and ingests it as below; bytes
-or hex still work from a caller no door stands in front of.
+envelope where the bytes were: `{form, beef: <pointer record CID>, subject?,
+vout?}` (shruggr/skein#146; the pointer record is the BEEF alone) (a bad
+BUMP: the message is a refusal entry and nothing runs). `ingest` reads the
+bytes back with the SDK's `chain.record.wireOf` (the exact bytes) and
+ingests them as below; bytes or hex still work from a caller no door
+stands in front of.
 
-**Ingest a BEEF** (V1, V2, Atomic or Outpoint; its subject the atomic or outpoint txid, else its
+**Ingest a BEEF** (V1, V2, Atomic, Outpoint or Subject; its subject the atomic, outpoint or subject txid, else its
 last transaction). SPV against this instance's chain: every BUMP's root is
 the header's merkle root at its height (an unknown height fails the
 ingest — feed the headers first); every transaction is in its BUMP, or
