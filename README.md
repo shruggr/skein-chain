@@ -4,7 +4,7 @@ The chain app for a [skein](https://github.com/shruggr/skein): the one
 writer of an instance's chain state (headers, transactions, proofs, spends,
 settlement, broadcasts) under the head `chain/state`, which every other app
 reads by CID. It is the only thing on an instance that broadcasts. Version
-**0.6.0**.
+**0.6.1**.
 
 ## What it is
 
@@ -126,11 +126,11 @@ at a pinned commit.
 
 | | |
 |---|---|
-| this app | 0.6.0 (tag `v0.6.0`) |
-| skein-sdk | v0.11.0, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
+| this app | 0.6.1 (tag `v0.6.1`) |
+| skein-sdk | v0.11.1, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
 | skein | log format 10; skein's equivs pin this repo by commit |
 
-0.6.0: `ingest {beef}` takes the envelope the kernel's door writes beside the pointer record (`{form, beef, subject?, vout?}`, shruggr/skein#146), read back with skein-sdk v0.11.0 `chain.record.wireOf`; a Subject BEEF (BRC-233) ingests like the other forms. 0.5.0: routes, no senders (shruggr/skein#143; skein-sdk v0.9.0). 0.4.0: the first step on an instance whose tree carries a header chain (`chain/headers`, the image's: shruggr/skein#132) loads it into the empty state — the whole chain from genesis, verified (skein-sdk v0.8.0 `chain.image`); the result record's `image: {headers, tip}`. 0.3.2: a proof after a reorg is answered to the same watchers as the first, with its `block` (#2; skein-sdk v0.7.1 keeps a proven transaction's watchers; the app uses only the SDK's `chain` module, so 0.7.0's `sk` changes — intentions, `authfetch`, no `provider(role)` — touch nothing here). 0.3.1: the status provider's box is `chain/status` (the manifest still writes `"status"`; skein resolves a box under the app's name, shruggr/skein#128). 0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
+0.6.1: `ingest` sorts a BEEF that came out of order (a child before its parent: ts-sdk's writer puts a proven child before its proven parent) parents-first and verifies it, instead of refusing `NotParentsFirst` (skein-sdk v0.11.1; David Case, 2026-10-22); SPV is as strict as before. 0.6.0: `ingest {beef}` takes the envelope the kernel's door writes beside the pointer record (`{form, beef, subject?, vout?}`, shruggr/skein#146), read back with skein-sdk v0.11.0 `chain.record.wireOf`; a Subject BEEF (BRC-233) ingests like the other forms. 0.5.0: routes, no senders (shruggr/skein#143; skein-sdk v0.9.0). 0.4.0: the first step on an instance whose tree carries a header chain (`chain/headers`, the image's: shruggr/skein#132) loads it into the empty state — the whole chain from genesis, verified (skein-sdk v0.8.0 `chain.image`); the result record's `image: {headers, tip}`. 0.3.2: a proof after a reorg is answered to the same watchers as the first, with its `block` (#2; skein-sdk v0.7.1 keeps a proven transaction's watchers; the app uses only the SDK's `chain` module, so 0.7.0's `sk` changes — intentions, `authfetch`, no `provider(role)` — touch nothing here). 0.3.1: the status provider's box is `chain/status` (the manifest still writes `"status"`; skein resolves a box under the app's name, shruggr/skein#128). 0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
 (shruggr/skein#79); 0.1.0 was the first release (shruggr/skein#78).
 
 ## Contributing
