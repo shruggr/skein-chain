@@ -4,7 +4,7 @@ The chain app for a [skein](https://github.com/shruggr/skein): the one
 writer of an instance's chain state (headers, transactions, proofs, spends,
 settlement, broadcasts) under the head `chain/state`, which every other app
 reads by CID. It is the only thing on an instance that broadcasts. Version
-**0.6.1**.
+**0.7.0**.
 
 ## What it is
 
@@ -22,7 +22,7 @@ Its routes (`etc/app.json`, shruggr/skein#143):
 
 | transport | box | filters | carries |
 |---|---|---|---|
-| `event` | `chain` | — | the host's events: a header from a feed, a proof from the broadcaster. Events only, never a message |
+| `event` | `chain` | — | the host's events: `chain` (the host chain's record, once per block, at install and at each start), a proof from the broadcaster. Events only, never a message |
 | `mailbox` | `chain` | `kernel.beef` | calls from anyone the kernel admits: the instance's own apps (the wallet, overlays) and root. Open (no role gates `ingest`, `status`, `proof`); `kernel.beef` hands `ingest` the BEEF's pointer record |
 | `mailbox` | `chain/status` (written `"status"`, shruggr/skein#128) | — | the status provider's messages |
 
@@ -52,12 +52,12 @@ question.
 
 What the host must provide:
 
-- **A headers feed** (the host's `SKEIN_HEADERS_URL`). Without headers the
-  app proves nothing: there is nothing to check a BUMP against. The chain
-  up to the moment the instance was made comes with its image
-  (shruggr/skein#132: `chain/headers` in the tree): the app's first step
-  loads it, and the feed's tip events continue from there (docs/CHAIN.md,
-  "Born with the chain").
+- **The host chain** (shruggr/skein#156): the host keeps the header chain
+  once, in its kernel process (fed by its `SKEIN_HEADERS_URL`; a fresh host
+  bootstraps it from the image's `chain/headers`), and sends this app a
+  `chain` event naming its record; the app's state points at it, never
+  copies it (docs/CHAIN.md, "The header chain is the host's"). Without it
+  the app proves nothing: there is nothing to check a BUMP against.
 - **A broadcaster** (the host's `SKEIN_ARC_URL`, its `status` provider).
   Without one, an unproven transaction is not broadcast and its status is
   not followed. An install on a host with no status provider leaves the
@@ -126,11 +126,11 @@ at a pinned commit.
 
 | | |
 |---|---|
-| this app | 0.6.1 (tag `v0.6.1`) |
-| skein-sdk | v0.11.1, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
+| this app | 0.7.0 (tag `v0.7.0`) |
+| skein-sdk | v0.12.0, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
 | skein | log format 10; skein's equivs pin this repo by commit |
 
-0.6.1: `ingest` sorts a BEEF that came out of order (a child before its parent: ts-sdk's writer puts a proven child before its proven parent) parents-first and verifies it, instead of refusing `NotParentsFirst` (skein-sdk v0.11.1; David Case, 2026-10-22); SPV is as strict as before. 0.6.0: `ingest {beef}` takes the envelope the kernel's door writes beside the pointer record (`{form, beef, subject?, vout?}`, shruggr/skein#146), read back with skein-sdk v0.11.0 `chain.record.wireOf`; a Subject BEEF (BRC-233) ingests like the other forms. 0.5.0: routes, no senders (shruggr/skein#143; skein-sdk v0.9.0). 0.4.0: the first step on an instance whose tree carries a header chain (`chain/headers`, the image's: shruggr/skein#132) loads it into the empty state — the whole chain from genesis, verified (skein-sdk v0.8.0 `chain.image`); the result record's `image: {headers, tip}`. 0.3.2: a proof after a reorg is answered to the same watchers as the first, with its `block` (#2; skein-sdk v0.7.1 keeps a proven transaction's watchers; the app uses only the SDK's `chain` module, so 0.7.0's `sk` changes — intentions, `authfetch`, no `provider(role)` — touch nothing here). 0.3.1: the status provider's box is `chain/status` (the manifest still writes `"status"`; skein resolves a box under the app's name, shruggr/skein#128). 0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
+0.7.0: the header chain is the host's (shruggr/skein#156): the event `chain {root, height}` points the state's `headers` and `heights` at the host chain record (skein-sdk v0.12.0 `State.pointAt`; a reorg the host took reverts the proofs above the fork); a `header` event is refused; the first step no longer loads the image's chain (the host bootstraps its own chain from it), and the result record has `chain: {root, height, fork}`, no `image`. 0.6.1: `ingest` sorts a BEEF that came out of order (a child before its parent: ts-sdk's writer puts a proven child before its proven parent) parents-first and verifies it, instead of refusing `NotParentsFirst` (skein-sdk v0.11.1; David Case, 2026-10-22); SPV is as strict as before. 0.6.0: `ingest {beef}` takes the envelope the kernel's door writes beside the pointer record (`{form, beef, subject?, vout?}`, shruggr/skein#146), read back with skein-sdk v0.11.0 `chain.record.wireOf`; a Subject BEEF (BRC-233) ingests like the other forms. 0.5.0: routes, no senders (shruggr/skein#143; skein-sdk v0.9.0). 0.4.0: the first step on an instance whose tree carries a header chain (`chain/headers`, the image's: shruggr/skein#132) loads it into the empty state — the whole chain from genesis, verified (skein-sdk v0.8.0 `chain.image`); the result record's `image: {headers, tip}`. 0.3.2: a proof after a reorg is answered to the same watchers as the first, with its `block` (#2; skein-sdk v0.7.1 keeps a proven transaction's watchers; the app uses only the SDK's `chain` module, so 0.7.0's `sk` changes — intentions, `authfetch`, no `provider(role)` — touch nothing here). 0.3.1: the status provider's box is `chain/status` (the manifest still writes `"status"`; skein resolves a box under the app's name, shruggr/skein#128). 0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
 (shruggr/skein#79); 0.1.0 was the first release (shruggr/skein#78).
 
 ## Contributing

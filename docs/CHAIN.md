@@ -1,4 +1,4 @@
-# The chain app (0.6.1)
+# The chain app (0.7.0)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an
@@ -77,38 +77,45 @@ proof of work, links; a heavier branch replaces ours from the fork point.
 Not checked, by decision (#29 Q3): the difficulty-adjustment rule,
 timestamps, versions.
 
-### Born with the chain: the image's headers (shruggr/skein#132)
+### The header chain is the host's (shruggr/skein#156)
 
-A skein holds the whole header chain from genesis, and never asks for a
-header: headers are pushed. **The image a skein is born from carries the
-chain** (skein docs/BOOTSTRAP.md, "The image's chain part"): the host grows
-it with every header it receives, so a skein made at any moment has every
-header up to the host's tip in its tree:
+The header chain is **owned by the host, held once per host, and kept by the
+host's kernel process** (skein `kernel-zig/src/host_chain.zig`, over the
+SDK's `chain.host`): one record per host,
 
 ```
-chain/headers/<first>   raw 80-byte headers in height order, 2016 per block, <first> the first one's
-                        height in 8 digits (00000000, 00002016, …); every block but the last is full
-chain/tip               {"height": <n>, "hash": "<display hex>"}
+{kind: "host-chain", network, maps: {headers: <MST root>, heights: <MST root>}, tip: {height, hash}}
 ```
 
-**The chain app's first step on such an instance starts from it**: with no
-chain state yet, it reads the head `main` (the tree its genesis named, the
-image's) and, when that tree carries `chain/headers`, loads every header
-into the empty state before the step's own work (skein-sdk `chain.image`
-`load`): verified as a run from genesis is (the network's genesis header
-first, links, targets, proof of work; a first header that is not the
-configured network's genesis fails the step, `WrongNetwork`), each header
-put as its `bitcoin-block` block (not kept: a header has no edges), and the
-`headers` and `heights` maps built in one pass. The result record says so:
-`image: {headers, tip}`. From then on the tip events continue as before;
-the first one usually is that step's own. Replay loads the same: the tree
-is the genesis's, and nothing extra is in the log. A tree with no
-`chain/headers` (an instance from an older image, a system tree) starts
-empty, as before.
+in the host's `host/chain` set, which every instance reads (the chain
+exception, shruggr/skein#133). The host's network side (its headers feed,
+`SKEIN_HEADERS_URL`) hands raw headers to the kernel process, which
+validates and appends them as `Chain.add` always did (links, targets, proof
+of work, the heavier branch replacing ours from the fork point).
 
-On mainnet that first step loads about 970 000 headers: some 15 s, and the
-instance's store grows by about 330 MB (the headers as blocks and the two
-maps), beside the image's own 78 MB of header blocks.
+**This app never copies a header.** Its state's `headers` and `heights`
+name the host chain record's roots: the host sends a `chain` event,
+`{kind: "chain", root: <host chain record>, height}`, in box `chain` once per
+block, once when the instance is installed and once at each start; the app
+points its state at that record (skein-sdk `State.pointAt`). The fork is the
+highest height where this state's chain and the host's agree (walked back
+from this state's tip; an empty state forks at 0). Headers of this state
+above the fork that the host's chain replaced revert the proofs against
+them, exactly as a heavier branch always did: those transactions are
+unproven again and broadcast again. Proofs that waited for a header are
+tried again. The result record says what happened: `chain: {root, height,
+fork}`. A `header` event is refused (`BadEvent`). Every other map (`txs`,
+`proofs`, `proofHeights`, `rejected`, `unproven`, `spent`, `broadcasts`) is
+this instance's own, as before; every reader reads `chain/state` exactly as
+before.
+
+**Birth.** The image a skein is born from still carries the chain
+(`chain/headers/<first>`, `chain/tip`: skein docs/BOOTSTRAP.md, "The image's
+chain part"), as the host's bootstrap for a fresh host chain: a host whose
+chain is empty imports it (the kernel's `chain-import`) before the new
+instance's first event. The app never loads an image itself. Replay
+resolves the same: the event is a log entry carrying the record's CID, and
+the host chain's blocks are never deleted.
 
 ## Its interface
 
@@ -193,10 +200,9 @@ answers come later, at an address.
 
 **The host's events** (sender-less, self-validating; skein docs/MESSAGES.md):
 
-- `{kind: "header", raw}` or `{kind: "header", raws: [...]}` (a run, parents
-  first) in box `chain` — the host's header feeds (their default box is
-  `chain`): the tip as it moves; the chain before the instance existed came
-  with its image (above);
+- `{kind: "chain", root: <the host chain record>, height}` in box `chain` —
+  the host's headers tracker: once per block, once at install and at each
+  start (above);
 - `{kind: "proof", subject: <tx CID>, txid, path, via?, …}` — the
   broadcaster's proof, or an overlay route's (`via`: its `-proof` gossip,
   checked against this instance's headers): to the thread awaiting the
@@ -244,8 +250,8 @@ its transaction is `proven` or `rejected`, and its registration ends there
 ]
 ```
 
-- the `event` route at `chain`: the host's events (a feed's header, the
-  broadcaster's proof) — specific wiring, never a message;
+- the `event` route at `chain`: the host's events (the host chain's
+  `chain` event, the broadcaster's proof) — specific wiring, never a message;
 - the mailbox route at `chain`: the callers (the instance's own apps by the
   host's loopback — the wallet, the overlay apps — and root). Open: no
   role gates its functions; the filter `kernel.beef` decodes an ingest's

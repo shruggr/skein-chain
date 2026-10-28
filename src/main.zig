@@ -14,9 +14,12 @@
 //!                         per change. Every unproven transaction at rest has a registered broadcast.
 //!       status {txid}     the transaction's state (CIDs: tx, block, settlement, broadcast)
 //!       proof {txid}      where its proof is: the header's CID, height, depth, position
-//!   box `chain`, an event (no sender)    the host's wiring: `header` ({raw} or {raws}, a run, parents
-//!                                        first) from its feeds; `proof` ({subject, txid, path, …}) from
-//!                                        its broadcaster, for a transaction no thread awaits
+//!   box `chain`, an event (no sender)    the host's wiring: `chain` ({root, height}: the host chain's
+//!                                        record, shruggr/skein#156 — sent once per block, and once at
+//!                                        install and at each start) from its headers tracker; `proof`
+//!                                        ({subject, txid, path, …}) from its broadcaster, for a
+//!                                        transaction no thread awaits. A `header` event is refused
+//!                                        (BadEvent): the header chain is the host's
 //!   box `chain/status`, a message        a status provider's ({kind: "status", txid, txStatus, …},
 //!                                        about its subject), for a transaction no thread awaits
 //!   a thread resting after a broadcast   its transactions' proofs (input `event`), statuses (input
@@ -25,13 +28,14 @@
 //! Called (`kind: "call"`, an in-VM or kernel call): `status` and `proof`, the
 //! same answers as dag-cbor on stdout; they write nothing.
 //!
-//! The first step on an instance whose tree (the head `main`: an image's,
-//! shruggr/skein#132) carries a header chain starts from it: every header
-//! from genesis to the image's tip, loaded into the empty state before the
-//! step's own work (skein-sdk `chain.image`); the tip events continue from there.
+//! The header chain is the host's (shruggr/skein#156): kept once per host by
+//! its kernel process, in the `host/chain` set every instance reads. A `chain`
+//! event points this state's `headers` and `heights` at the host chain
+//! record's (skein-sdk `State.pointAt`): no copy; a reorg the host chain took
+//! reverts the proofs above the fork, as a heavier branch always did.
 //!
 //! Every step keeps a result record and prints its CID:
-//!   {kind: "chain-result", op, image?: {headers, tip}, fn?, txid?, status?, error?, answered, broadcast, awaited?, state}
+//!   {kind: "chain-result", op, chain?: {root, height, fork}, fn?, txid?, status?, error?, answered, broadcast, awaited?, state}
 const std = @import("std");
 const c = @import("chain");
 const vm = @import("vm.zig");
@@ -97,9 +101,6 @@ fn run(a: Allocator) anyerror!void {
     const state = try vm.head(a, head_name);
     var p = Step{ .a = a, .conf = conf, .st = try State.load(a, s, state, conf.network) };
     p.st.now = @intCast(in.getUint("at") orelse return error.BadInput);
-    // shruggr/skein#132: the first step on an instance whose tree carries a header chain
-    // (`chain/headers`, the image's) starts from it — the whole chain from genesis.
-    const from_image = if (state == null) try loadImage(&p) else false;
     const args = in.get("args") orelse return error.BadInput;
     var op: []const u8 = "event";
 
@@ -138,7 +139,7 @@ fn run(a: Allocator) anyerror!void {
     for (try shape.changeAnswers(a, &p.st, p.via)) |x| try p.answer(x.to, x.box, x.body);
 
     var new_state: ?[]const u8 = state;
-    if (p.writes or from_image) {
+    if (p.writes) {
         new_state = try p.st.save();
         if (state == null or !eql(u8, state.?, new_state.?)) try vm.advance(head_name, new_state.?);
     }
@@ -176,34 +177,19 @@ fn run(a: Allocator) anyerror!void {
     _ = try vm.finish(a, .{ .map = out.items });
 }
 
-/// An empty chain state filled from the header chain the instance's tree
-/// carries (skein-sdk `chain.image`: the head `main`, the tree its genesis
-/// named — the image's, so a replay loads the same): whether there was one.
-fn loadImage(p: *Step) !bool {
-    const root = (try vm.head(p.a, "main")) orelse return false;
-    if (root.len < 2 or root[1] != 0x78) return false; // not a git tree
-    const got = (try c.image.load(&p.st, root)) orelse return false;
-    try p.field("image", .{ .map = try p.a.dupe(cbor.Entry, &.{
-        .{ .key = "headers", .value = .{ .uint = got.headers } },
-        .{ .key = "tip", .value = .{ .uint = got.tip } },
-    }) });
-    return true;
-}
-
-/// A `header` or `proof` event (the host's feeds and broadcaster).
+/// A `chain` or `proof` event (the host's headers tracker and broadcaster).
 fn onEvent(p: *Step, ev: Value) !void {
-    const a = p.a;
     const kind = ev.getText("kind") orelse return error.BadEvent;
     try p.field("event", .{ .text = kind });
-    if (eql(u8, kind, "header")) {
-        var raws: std.ArrayList([]const u8) = .empty;
-        if (ev.getArray("raws")) |rs| {
-            for (rs) |r| try raws.append(a, if (r == .bytes) r.bytes else return error.BadEvent);
-        } else try raws.append(a, ev.getBytes("raw") orelse return error.BadEvent);
-        const res = try p.st.addHeaders(raws.items);
-        try p.field("added", .{ .uint = res.added });
-        try p.field("tip", .{ .uint = res.tip });
-        if (res.replaced > 0) try p.field("replaced", .{ .uint = res.replaced });
+    if (eql(u8, kind, "chain")) {
+        // shruggr/skein#156: the host chain's record (read through the host/chain exception, #133).
+        const root = ev.getCid("root") orelse return error.BadEvent;
+        const got = try p.st.pointAt(root);
+        try p.field("chain", .{ .map = try p.a.dupe(cbor.Entry, &.{
+            .{ .key = "root", .value = .{ .cid = root } },
+            .{ .key = "height", .value = .{ .uint = got.height } },
+            .{ .key = "fork", .value = .{ .uint = got.fork } },
+        }) });
     } else if (eql(u8, kind, "proof")) {
         const txid = if (ev.getCid("subject")) |s| c.store.bitcoinHash(s) orelse return error.BadEvent else c.header.fromHex(ev.getText("txid") orelse return error.BadEvent) catch return error.BadEvent;
         try p.field("txid", try p.hex(txid));
