@@ -66,7 +66,12 @@ of its watchers keep waiting. A proven transaction is never rejected.
 A reorg that replaces the block a proof names turns the transaction back to
 unproven: its broadcast is registered again, with the watchers of the
 broadcast its first proof settled (the `proofs` entry's `broadcast` link),
-and it is broadcast again. A reorg is another proof for the same
+and nothing is sent anywhere (0.7.1, David 2026-10-30: "I see no value in
+rebroadcast, as the state should all be tied together and should heal when
+updated proofs propagate" — before 0.7.1 it was broadcast again). The new
+proof arrives as the first did: the host's status feed carries every
+transaction submitted under its token, and a status new by its block hash
+is routed to the instance as a proof event. A reorg is another proof for the same
 transaction, a different block (shruggr/skein#112): when it is proven
 again, those watchers are answered `proven` again, at the same request,
 with the new `block` and `height`. The reorg itself answers nothing.
@@ -102,7 +107,7 @@ highest height where this state's chain and the host's agree (walked back
 from this state's tip; an empty state forks at 0). Headers of this state
 above the fork that the host's chain replaced revert the proofs against
 them, exactly as a heavier branch always did: those transactions are
-unproven again and broadcast again. Proofs that waited for a header are
+unproven again (not broadcast again, 0.7.1). Proofs that waited for a header are
 tried again. The result record says what happened: `chain: {root, height,
 fork}`. A `header` event is refused (`BadEvent`). Every other map (`txs`,
 `proofs`, `proofHeights`, `rejected`, `unproven`, `spent`, `broadcasts`) is

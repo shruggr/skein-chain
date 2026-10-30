@@ -73,7 +73,7 @@ const Step = struct {
     fields: std.ArrayList(cbor.Entry) = .empty,
     /// Answers to send: (to, box, body).
     answers: std.ArrayList(struct { []const u8, []const u8, Value }) = .empty,
-    /// Transactions this step registered (an ingest, a reorg): broadcast and awaited.
+    /// Transactions this step registered (an ingest): broadcast and awaited.
     to_broadcast: std.ArrayList([32]u8) = .empty,
     /// Transactions this thread rests on after the step.
     awaited: std.ArrayList([32]u8) = .empty,
@@ -133,8 +133,10 @@ fn run(a: Allocator) anyerror!void {
         try onMessage(&p, args, try s.getValue(a, bc));
     } else return error.BadInput;
 
-    // A reorg this step turned proven transactions back to unproven: registered again, broadcast again.
-    for (p.st.reverted.items) |t| if (!contains(p.to_broadcast.items, t)) try p.to_broadcast.append(a, t);
+    // A reorg this step turned proven transactions back to unproven: nothing is sent anywhere (0.7.1, the
+    // settled sync design, David 2026-10-30: "I see no value in rebroadcast"). The new proof arrives as
+    // the first did: the host's status feed carries every transaction under its token, a new blockHash is
+    // a new status, routed as a proof event; that step answers every watcher.
     // Every state change of a watched transaction: an answer to each watcher (a proof after a reorg: again).
     for (try shape.changeAnswers(a, &p.st, p.via)) |x| try p.answer(x.to, x.box, x.body);
 
