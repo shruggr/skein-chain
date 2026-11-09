@@ -130,6 +130,14 @@ pub fn broadcast(a: std.mem.Allocator, txid: [32]u8, beef: []const u8) !void {
     _ = try result(a, sk.emit, .{ ev.ptr, @as(u32, @intCast(ev.len)) });
 }
 
+/// A fact (skein 0.5.0, docs/VM.md "emit"): `{event: <name>, …fields}` — the kernel records it as
+/// `{kind: "event", event, app, …fields}` and indexes it under its name → the record's CID. The name
+/// is under the app's own name.
+pub fn emitEvent(a: std.mem.Allocator, ev: Value) ![]const u8 {
+    const bytes = try cbor.encode(a, ev);
+    return result(a, sk.emit, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) });
+}
+
 /// Rest the thread until an event or a message about this record (a transaction's CID) arrives.
 pub fn awaitRecord(cid: []const u8) !void {
     if (sk.@"await"(cid.ptr, @intCast(cid.len)) < 0) return failed();

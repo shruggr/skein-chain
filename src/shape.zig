@@ -160,30 +160,54 @@ pub fn answerBody(a: Allocator, func: []const u8, request: []const u8, outcome: 
     return .{ .map = es.items };
 }
 
-/// A watcher (a broadcast record's `watchers` entry): who to answer, in which box, about which request.
-pub const Watcher = struct { to: []const u8, box: []const u8, request: []const u8 };
-
-pub fn watcherOf(v: Value) ?Watcher {
-    return .{ .to = v.getBytes("to") orelse return null, .box = v.getText("box") orelse return null, .request = v.getCid("request") orelse return null };
+/// A transaction's status as a fact (0.8.0, David 2026-11-09): the emit `{event: "<app>/tx/<txid hex>",
+/// status, height?}` — `status` "accepted", "mined" (with `height`, its block's on our best chain),
+/// "rejected" or "reorged".
+pub fn statusEvent(a: Allocator, app: []const u8, txid: [32]u8, status: []const u8, height: ?u64) !Value {
+    var es: std.ArrayList(cbor.Entry) = .empty;
+    try es.appendSlice(a, &.{
+        .{ .key = "event", .value = .{ .text = try std.fmt.allocPrint(a, "{s}/tx/{s}", .{ app, &c.header.toHex(txid) }) } },
+        .{ .key = "status", .value = .{ .text = status } },
+    });
+    if (height) |h| try es.append(a, .{ .key = "height", .value = .{ .uint = h } });
+    return .{ .map = es.items };
 }
 
-/// An answer to a watcher: who, which box, the `ingest` answer body.
-pub const Answer = struct { to: []const u8, box: []const u8, body: Value };
+/// The height of a proven transaction's block on our best chain (null: not proven).
+fn minedHeight(st: *State, txid: [32]u8) !?u64 {
+    if ((try st.status(txid)) != .proven) return null;
+    const r = (try st.proofRecord(txid)) orelse return null;
+    const h = (try st.chain().heightOf(c.store.bitcoinHash(r.block) orelse return null)) orelse return null;
+    return h;
+}
 
-/// Every state change of a watched transaction this step (`st.changes`): an `ingest` answer to each of
-/// its watchers, at the request they watched by. A proof after a reorg is another change: the watchers
-/// of the first proof (kept by the chain state, skein-sdk 0.7.1) are answered again, with the new
-/// `block`. `via`: a proof that came by a route's wiring (an overlay's `-proof` gossip) — its watchers
-/// are told, so they do not publish it again.
-pub fn changeAnswers(a: Allocator, st: *State, via: ?[]const u8) ![]Answer {
-    var out: std.ArrayList(Answer) = .empty;
-    for (st.changes.items) |ch| for (ch.watchers) |wv| {
-        const w = watcherOf(wv) orelse continue;
-        var result = try txState(a, st, ch.txid, @tagName(ch.state), ch.detail);
-        if (ch.state == .proven) if (via) |v| {
-            result = .{ .map = try std.mem.concat(a, cbor.Entry, &.{ result.map, &.{.{ .key = "via", .value = .{ .text = v } }} }) };
-        };
-        try out.append(a, .{ .to = w.to, .box = w.box, .body = try answerBody(a, "ingest", w.request, .{ .ok = result }) });
+/// Every status this step came to, as facts, in order: each transaction a reorg turned back to
+/// unproven (`st.reverted`: "reorged"), then each state change of a transaction with a registered
+/// broadcast (`st.changes`: "accepted", "mined" with its height, "rejected"), then — an ingest — its
+/// subject's status as it stands ("mined", "rejected", or "accepted" once a status accepted it; none
+/// while it is only broadcast). A transaction's same status twice in one step is one fact.
+pub fn statusEvents(a: Allocator, st: *State, app: []const u8, ingested: ?[32]u8) ![]Value {
+    const Said = struct { txid: [32]u8, status: []const u8 };
+    var said: std.ArrayList(Said) = .empty;
+    var out: std.ArrayList(Value) = .empty;
+    const add = struct {
+        fn f(al: Allocator, s: *State, ap: []const u8, ss: *std.ArrayList(Said), o: *std.ArrayList(Value), txid: [32]u8, status: []const u8) !void {
+            for (ss.items) |x| if (eql(u8, &x.txid, &txid) and eql(u8, x.status, status)) return;
+            try ss.append(al, .{ .txid = txid, .status = status });
+            const h = if (eql(u8, status, "mined")) try minedHeight(s, txid) else null;
+            try o.append(al, try statusEvent(al, ap, txid, status, h));
+        }
+    }.f;
+    for (st.reverted.items) |t| try add(a, st, app, &said, &out, t, "reorged");
+    for (st.changes.items) |ch| try add(a, st, app, &said, &out, ch.txid, switch (ch.state) {
+        .accepted => "accepted",
+        .proven => "mined",
+        .rejected => "rejected",
+    });
+    if (ingested) |t| switch (try st.status(t)) {
+        .proven => try add(a, st, app, &said, &out, t, "mined"),
+        .rejected => try add(a, st, app, &said, &out, t, "rejected"),
+        .unproven => if (try st.broadcastRecord(t)) |r| if (r.getBool("accepted") orelse false) try add(a, st, app, &said, &out, t, "accepted"),
     };
     return out.items;
 }

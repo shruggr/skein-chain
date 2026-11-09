@@ -1,4 +1,4 @@
-# The chain app (0.7.0)
+# The chain app (0.8.0)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an
@@ -31,7 +31,7 @@ The head `chain/state` (`<app>/state`; the app record is `chain/app`):
 | `headers` | height (u32 BE) → header (`bitcoin-block` link) | the best chain, anchored at the network's genesis header |
 | `heights` | block hash → height | the best chain, backwards |
 | `txs` | txid → transaction (`bitcoin-tx` link) | every transaction ingested; each kept, so its inputs are the kernel's `spends` edges (#42) |
-| `proofs` | txid → `{block, depth, position, broadcast?}` | its block's header (a link) and its leaf; `broadcast`: the broadcast record its proof settled (a link: its watchers, for a reorg); the merkle nodes are 64-byte `bitcoin-tx` blocks under the header's root (a BUMP is rebuilt by descent: `merkle.pathFor`) |
+| `proofs` | txid → `{block, depth, position, broadcast?}` | its block's header (a link) and its leaf; `broadcast`: the broadcast record its proof settled (a link); the merkle nodes are 64-byte `bitcoin-tx` blocks under the header's root (a BUMP is rebuilt by descent: `merkle.pathFor`) |
 | `proofHeights` | height ‖ txid → null | what a reorg reverts |
 | `rejected` | txid → settlement record | `{kind: "settlement", txid, status: "rejected", reason, at, cause?}` |
 | `unproven` | txid → null | derived: held, neither proven on the best chain nor rejected |
@@ -46,14 +46,15 @@ transaction is in `unproven` only while `broadcasts` holds its record:
 
 ```
 {kind: "broadcast", txid (hex), subject: <tx CID>, since: ms, txStatus,
- accepted?: true, path?: bytes, watchers: [{to: bytes(33), box, request: <message CID>}]}
+ accepted?: true, path?: bytes, watchers: []}
 ```
 
 `since` is its first broadcast; `accepted` is set by
 the first status that is not a rejection; `path` is a proof that came
-before its header (tried again when headers arrive); `watchers` are the
-callers answered on each state change. Proven or rejected, the record goes
-(proven, its `proofs` entry links it, so its watchers outlast it).
+before its header (tried again when headers arrive); `watchers` is empty
+since 0.8.0 (the field is the SDK's record shape; nothing registers a
+watcher: every status is a fact, below). Proven or rejected, the record goes
+(proven, its `proofs` entry links it).
 
 Status is computed from the records: **rejected** (a settlement record),
 **proven** (its proof's block is on the best chain), else **unproven**. A
@@ -62,19 +63,17 @@ and rejects them too (`input-rejected`, `cause` the first); a proof rejects
 every other held transaction spending one of the same outputs
 (`double-spent`). Nothing else rejects: a transaction the chain app cannot
 prove stays known and unproven for as long as it is held, and the threads
-of its watchers keep waiting. A proven transaction is never rejected.
+resting on its fact keep resting. A proven transaction is never rejected.
 A reorg that replaces the block a proof names turns the transaction back to
-unproven: its broadcast is registered again, with the watchers of the
-broadcast its first proof settled (the `proofs` entry's `broadcast` link),
+unproven — the fact `reorged` — and its broadcast is registered again,
 and nothing is sent anywhere (0.7.1, David 2026-10-30: "I see no value in
 rebroadcast, as the state should all be tied together and should heal when
 updated proofs propagate" — before 0.7.1 it was broadcast again). The new
 proof arrives as the first did: the host's status feed carries every
 transaction submitted under its token, and a status new by its block hash
 is routed to the instance as a proof event. A reorg is another proof for the same
-transaction, a different block (shruggr/skein#112): when it is proven
-again, those watchers are answered `proven` again, at the same request,
-with the new `block` and `height`. The reorg itself answers nothing.
+transaction, a different block (shruggr/skein#112): proven again, it is the
+fact `mined` again, with the new `height`.
 
 The chain tracker's rules are the SDK's (`chain/src/chain.zig`): every
 header must chain back to the network's genesis header; usable target,
@@ -167,29 +166,45 @@ event `{event: "broadcast", tx: <its CID>, beef: <its Atomic BEEF>}`
 thread rests awaiting them, with no deadline; after each step it rests
 again on those still unproven.
 
-The caller (the message's sender) is answered at its address, in the box
-it wrote to, as an app answers (docs/APPS.md §4). A caller that is the
-instance itself — the wallet, an overlay — is answered by the same loopback
-it wrote by (shruggr/skein#79), and the answer steps the thread awaiting its
-`ingest` message:
+**Every status is a fact** (0.8.0, David 2026-11-09). Each status of a
+transaction a step comes to is recorded (the state above) and emitted as the
+fact `<app>/tx/<txid hex>` (skein 0.5.0's event index, under the app's own
+name — `chain/tx/<txid>`; a listener's thread rests on the name, skein
+0.5.4's `on(name)`, and every fact under it wakes it):
+
+| `status` | when | also |
+|---|---|---|
+| `accepted` | the first status from the status provider that is not a rejection (RECEIVED, SEEN_ON_NETWORK, …) | |
+| `mined` | its proof, on the best chain (at once for a transaction that arrives proven); again after a reorg, proven in another block | `height` |
+| `rejected` | a rejecting status (REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED), a competing spend proven, something it spends rejected | (the settlement record says why: `status {txid}`'s `reason`) |
+| `reorged` | a reorg turned it back to unproven | |
+
+An `ingest` emits its subject's status as it stands (`mined`, `rejected`, or
+`accepted` when a status accepted it already; nothing while it is only
+broadcast), so a listener that rests on the name before its ingest is
+answered hears it. The watchers list is gone: a status is never sent to a
+caller as a message.
+
+The caller of `ingest` (the message's sender) is answered once, at its
+address, in the box it wrote to, as an app answers (docs/APPS.md §4) — when
+there is a status to answer at the ingest (proven, rejected, accepted
+already), or an error:
 
 ```
 {fn, request: <the request message's CID>, replyTo: <the same>, result: {txid, tx: <CID>, state, …}}
 {fn, request, replyTo, error: {code, message}}
 ```
 
-| state | when | result also carries |
-|---|---|---|
-| `proven` | at once, for a transaction that arrives proven (or is proven already); later, when its proof arrives; again after a reorg, when it is proven in another block (each proof one answer, to the same watchers) | `block` (the header's CID), `height`; `via` when the proof event came by a route's wiring (an overlay's `-proof` gossip: the watcher does not publish it again) |
-| `accepted` | the first status from the status provider that is not a rejection (RECEIVED, SEEN_ON_NETWORK, …); at once for a second ingest of a transaction already accepted | `txStatus`, `broadcast` (the broadcast record's CID) |
-| `rejected` | a rejecting status (REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED), a competing spend proven, something it spends rejected; at once if it is rejected already | `reason`, `settlement` (the settlement record's CID) |
+| state | result also carries |
+|---|---|
+| `proven` | `block` (the header's CID), `height` |
+| `accepted` | `txStatus`, `broadcast` (the broadcast record's CID) |
+| `rejected` | `reason`, `settlement` (the settlement record's CID) |
 
-So an unproven transaction's caller gets several answers to one request,
-`accepted` then `proven` (or `rejected`), each a message with the same
-`replyTo`. A second ingest of a pending transaction adds its caller as
-another watcher. An answer goes out only when the address book reaches
-the caller; either way it is in the log. Errors: `bad-request` (no `fn`),
-`unknown-fn`, `bad-args`, `failed` (`ingest: InvalidBeef`, `RootMismatch`,
+An unproven transaction not yet accepted is not answered: its statuses are
+the facts. An answer goes out only when the address book reaches the caller;
+either way it is in the log. Errors: `bad-request` (no `fn`), `unknown-fn`,
+`bad-args`, `failed` (`ingest: InvalidBeef`, `RootMismatch`,
 `UnknownHeader`, `ScriptFailed`, `MissingInput`, …; `not proven` for
 `proof`).
 
@@ -200,8 +215,8 @@ the store under the header's merkle root.
 
 The reads are also a kernel call or an in-VM `call` (`kind: "call"`, `fn`
 `status` / `proof`, `arg` dag-cbor `{txid}`, the answer dag-cbor on stdout;
-they write nothing). `ingest` is refused there (`IngestIsAMessage`): its
-answers come later, at an address.
+they write nothing). `ingest` is refused there (`IngestIsAMessage`): it
+writes.
 
 **The host's events** (sender-less, self-validating; skein docs/MESSAGES.md):
 
@@ -221,14 +236,14 @@ rejected by a competing proof, and never `accepted`.
 
 The chain app is the only thing that emits the broadcast event. The
 wallet and the overlay apps (shruggr/skein#79) neither broadcast nor take
-headers, proofs or statuses: they send `ingest` and wait on the answers.
+headers, proofs or statuses: they send `ingest` and rest on its facts.
 
 ## Where it is going: a reference is a subscription
 
-What is built above is a one-shot answer set: a watcher is answered until
-its transaction is `proven` or `rejected`, and its registration ends there
-(the broadcast record goes with it). The decided direction (shruggr/skein#31,
-"Decided 2026-10-02 (night)") changes that, and is not built yet:
+0.8.0 built the first point below: a status is a fact that every listener
+resting on the transaction's name hears, for the life of the transaction
+(no registration, no watcher, nothing that ends). The rest of the decided
+direction (shruggr/skein#31, "Decided 2026-10-02 (night)") is not built yet:
 
 - A registration lasts for the life of the transaction. Every change of its
   chain state (accepted, proven, reorged out, conflicted by a proven spend)

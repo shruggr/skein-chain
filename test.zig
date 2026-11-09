@@ -1,6 +1,6 @@
 //! The chain app's pure parts (src/shape.zig), natively: its configuration,
 //! its functions, and the shapes of its answers over a chain state in memory
-//! (a reorg: the same watcher answered `proven` again, with the new block).
+//! (0.8.0: every status a fact `chain/tx/<txid>`, a reorg's too).
 //! The flow through a kernel (ingest, broadcast, statuses, proofs, the
 //! answers, replay) is skein's kernel-zig/equiv/chain.ts.
 const std = @import("std");
@@ -63,7 +63,7 @@ test "answers: {fn, request, replyTo, result | error}; an unknown transaction's 
     try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, (try shape.beefArg(a, args)).?);
 }
 
-// ------------------------------------------------------------ a reorg: another proof, the same watcher
+// ------------------------------------------------------------ the facts: every status, a reorg's too
 
 fn mine(prev: [32]u8, merkle_root: [32]u8, time: u32) [80]u8 {
     var h = c.header.Header{ .version = 1, .prev_hash = prev, .merkle_root = merkle_root, .time = time, .bits = 0x207fffff, .nonce = 0 };
@@ -124,7 +124,15 @@ fn spend(a: std.mem.Allocator, src: *const c.bsvz.transaction.Transaction) !Tx {
     return .{ .tx = tx, .raw = raw, .txid = c.beef.txidOf(raw) };
 }
 
-test "a reorg: proven, reorged out, proven in another block — the same watcher answered `proven` twice, each with its block (#2)" {
+fn expectFact(e: Value, txid: [32]u8, status: []const u8, height: ?u64) !void {
+    var name: [64 + 9]u8 = undefined;
+    _ = try std.fmt.bufPrint(&name, "chain/tx/{s}", .{&c.header.toHex(txid)});
+    try std.testing.expectEqualStrings(&name, e.getText("event").?);
+    try std.testing.expectEqualStrings(status, e.getText("status").?);
+    try std.testing.expectEqual(height, e.getUint("height"));
+}
+
+test "every status a fact (0.8.0): ingested (nothing yet), accepted, mined at 2, reorged, mined at 4 — chain/tx/<txid> each time, no watchers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -132,7 +140,7 @@ test "a reorg: proven, reorged out, proven in another block — the same watcher
     defer ms.deinit();
     const State = c.state.State;
 
-    // Height 1 holds the funding; the child comes in unproven over it, a caller watching.
+    // Height 1 holds the funding; the child comes in unproven over it.
     const fund = try funding(a);
     const h1 = mine(c.header.hash(&c.chain.Network.regtest.genesis()), fund.txid, 1_700_000_600);
     var st = try State.load(a, ms.store(), null, .regtest);
@@ -144,47 +152,81 @@ test "a reorg: proven, reorged out, proven in another block — the same watcher
         .{ .txid = child.txid, .format = .raw, .raw = child.raw, .tx = child.tx },
     };
     const beef = try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = child.txid, .bumps = &bumps, .entries = &entries });
-    const caller: [33]u8 = .{0x02} ++ .{0x44} ** 32;
-    const request: [36]u8 = .{ 0x01, 0x71, 0x12, 0x20 } ++ .{0x55} ** 32;
     _ = try st.ingest(beef);
-    try st.watch(child.txid, &caller, "chain", &request);
+    // Only broadcast: no status yet, no fact.
+    try std.testing.expectEqual(@as(usize, 0), (try shape.statusEvents(a, &st, "chain", child.txid)).len);
+    const ingested = try st.save();
+
+    // A status accepts it.
+    var st1 = try State.load(a, ms.store(), ingested, .regtest);
+    try std.testing.expectEqual(State.Outcome.accepted, try st1.applyStatus(child.txid, "SEEN_ON_NETWORK", null));
+    var facts = try shape.statusEvents(a, &st1, "chain", null);
+    try std.testing.expectEqual(@as(usize, 1), facts.len);
+    try expectFact(facts[0], child.txid, "accepted", null);
+    // Ingested again, accepted already: its status as it stands, once.
+    _ = try st1.ingest(beef);
+    facts = try shape.statusEvents(a, &st1, "chain", child.txid);
+    try std.testing.expectEqual(@as(usize, 1), facts.len);
+    const accepted = try st1.save();
 
     // Proven at height 2.
+    var st2 = try State.load(a, ms.store(), accepted, .regtest);
     const h2 = mine(c.header.hash(&h1), child.txid, 1_700_001_200);
-    _ = try st.addHeaders(&.{&h2});
-    try std.testing.expectEqual(State.Outcome.proven, try st.applyStatus(child.txid, "MINED", try soloPath(a, 2, child.txid)));
-    const first = try shape.changeAnswers(a, &st, null);
-    try std.testing.expectEqual(@as(usize, 1), first.len);
-    const proven = try st.save();
+    _ = try st2.addHeaders(&.{&h2});
+    try std.testing.expectEqual(State.Outcome.proven, try st2.applyStatus(child.txid, "MINED", try soloPath(a, 2, child.txid)));
+    facts = try shape.statusEvents(a, &st2, "mychain", null);
+    try std.testing.expectEqual(@as(usize, 1), facts.len);
+    try std.testing.expect(std.mem.startsWith(u8, facts[0].getText("event").?, "mychain/tx/"));
+    try std.testing.expectEqual(@as(?u64, 2), facts[0].getUint("height"));
+    facts = try shape.statusEvents(a, &st2, "chain", null);
+    try expectFact(facts[0], child.txid, "mined", 2);
+    const proven = try st2.save();
 
-    // A heavier branch without it: unproven again, its broadcast registered again (to be broadcast).
-    var st2 = try State.load(a, ms.store(), proven, .regtest);
+    // A heavier branch without it: reorged (no broadcast, no other fact).
+    var st3 = try State.load(a, ms.store(), proven, .regtest);
     const alt2 = mine(c.header.hash(&h1), .{3} ** 32, 1_700_001_201);
     const alt3 = mine(c.header.hash(&alt2), .{4} ** 32, 1_700_001_202);
-    _ = try st2.addHeaders(&.{ &alt2, &alt3 });
-    try std.testing.expectEqual(@as(usize, 1), st2.reverted.items.len);
-    try std.testing.expectEqual(@as(usize, 0), (try shape.changeAnswers(a, &st2, null)).len);
-    const reverted = try st2.save();
+    _ = try st3.addHeaders(&.{ &alt2, &alt3 });
+    facts = try shape.statusEvents(a, &st3, "chain", null);
+    try std.testing.expectEqual(@as(usize, 1), facts.len);
+    try expectFact(facts[0], child.txid, "reorged", null);
+    const reverted = try st3.save();
 
-    // Proven again at height 4, another block.
-    var st3 = try State.load(a, ms.store(), reverted, .regtest);
+    // Proven again at height 4, another block: mined again, with its height.
+    var st4 = try State.load(a, ms.store(), reverted, .regtest);
     const alt4 = mine(c.header.hash(&alt3), child.txid, 1_700_001_203);
-    _ = try st3.addHeaders(&.{&alt4});
-    try std.testing.expectEqual(State.Outcome.proven, try st3.applyStatus(child.txid, "MINED", try soloPath(a, 4, child.txid)));
-    const second = try shape.changeAnswers(a, &st3, null);
-    try std.testing.expectEqual(@as(usize, 1), second.len);
+    _ = try st4.addHeaders(&.{&alt4});
+    try std.testing.expectEqual(State.Outcome.proven, try st4.applyStatus(child.txid, "MINED", try soloPath(a, 4, child.txid)));
+    facts = try shape.statusEvents(a, &st4, "chain", null);
+    try std.testing.expectEqual(@as(usize, 1), facts.len);
+    try expectFact(facts[0], child.txid, "mined", 4);
+    // Ingested again, proven: `mined` as it stands.
+    _ = try st4.ingest(beef);
+    facts = try shape.statusEvents(a, &st4, "chain", child.txid);
+    try std.testing.expectEqual(@as(usize, 1), facts.len);
+}
 
-    // Two `proven` answers to the same watcher, to the same request, each naming its own block.
-    for ([_]shape.Answer{ first[0], second[0] }) |x| {
-        try std.testing.expectEqualSlices(u8, &caller, x.to);
-        try std.testing.expectEqualStrings("chain", x.box);
-        try std.testing.expectEqualSlices(u8, &request, x.body.getCid("replyTo").?);
-        try std.testing.expectEqualStrings("proven", x.body.get("result").?.getText("state").?);
-    }
-    const r1 = first[0].body.get("result").?;
-    const r2 = second[0].body.get("result").?;
-    try std.testing.expectEqualSlices(u8, &c.store.hashCid(.block, c.header.hash(&h2)), r1.getCid("block").?);
-    try std.testing.expectEqualSlices(u8, &c.store.hashCid(.block, c.header.hash(&alt4)), r2.getCid("block").?);
-    try std.testing.expectEqual(@as(u64, 2), r1.getUint("height").?);
-    try std.testing.expectEqual(@as(u64, 4), r2.getUint("height").?);
+test "rejected (0.8.0): a rejection is the fact `rejected`, once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    const State = c.state.State;
+    const fund = try funding(a);
+    const h1 = mine(c.header.hash(&c.chain.Network.regtest.genesis()), fund.txid, 1_700_000_600);
+    var st = try State.load(a, ms.store(), null, .regtest);
+    _ = try st.addHeaders(&.{&h1});
+    const child = try spend(a, &fund.tx);
+    var bumps = [_]c.bsvz.spv.MerklePath{try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 1, fund.txid))};
+    var entries = [_]c.beef.Entry{
+        .{ .txid = fund.txid, .format = .raw_with_bump, .bump = 0, .raw = fund.raw, .tx = fund.tx },
+        .{ .txid = child.txid, .format = .raw, .raw = child.raw, .tx = child.tx },
+    };
+    const beef = try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = child.txid, .bumps = &bumps, .entries = &entries });
+    _ = try st.ingest(beef);
+    try std.testing.expectEqual(State.Outcome.rejected, try st.applyStatus(child.txid, "DOUBLE_SPEND_ATTEMPTED", null));
+    const facts = try shape.statusEvents(a, &st, "chain", child.txid);
+    try std.testing.expectEqual(@as(usize, 1), facts.len);
+    try expectFact(facts[0], child.txid, "rejected", null);
 }

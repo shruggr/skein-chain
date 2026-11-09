@@ -7,11 +7,9 @@
 //!
 //!   box `chain`, a message {fn, args}     from a caller the kernel admits (skein#143: an open route, filter kernel.beef — the instance's own apps, root):
 //!       ingest {beef}     record a BEEF: the envelope the kernel's door wrote (skein #121, #146), or bytes. Proven (its BUMPs verify against our headers): answered at
-//!                         once. Unproven: recorded, broadcast (the event the host carries to its
-//!                         network), and the caller answered on each state change — accepted (the
-//!                         first status that is not a rejection), proven, rejected — at its
-//!                         address: {fn, request, replyTo, result: {txid, tx, state, …}}, one answer
-//!                         per change. Every unproven transaction at rest has a registered broadcast.
+//!                         once. Unproven: recorded and broadcast (the event the host carries to its
+//!                         network); answered at once only when it is accepted already. 0.8.0: no
+//!                         watchers — every status of a transaction (below) is a fact.
 //!       status {txid}     the transaction's state (CIDs: tx, block, settlement, broadcast)
 //!       proof {txid}      where its proof is: the header's CID, height, depth, position
 //!   box `chain`, an event (no sender)    the host's wiring: `chain` ({root, height}: the host chain's
@@ -34,8 +32,16 @@
 //! record's (skein-sdk `State.pointAt`): no copy; a reorg the host chain took
 //! reverts the proofs above the fork, as a heavier branch always did.
 //!
+//! Every status of a transaction a step comes to (0.8.0, David 2026-11-09) is recorded (the state) and
+//! emitted as the fact `<app>/tx/<txid>` (skein 0.5.0's event index; listeners rest on the name,
+//! skein 0.5.4): `{status: "accepted"}` (the first status that is not a rejection), `{status:
+//! "mined", height}` (its proof, on our best chain; again in another block after a reorg),
+//! `{status: "rejected"}` (the settlement record says why), `{status: "reorged"}` (a reorg turned
+//! it back to unproven). An ingest emits the subject's status as it stands (mined, rejected,
+//! accepted; nothing while it is only broadcast). The watchers list is gone.
+//!
 //! Every step keeps a result record and prints its CID:
-//!   {kind: "chain-result", op, chain?: {root, height, fork}, fn?, txid?, status?, error?, answered, broadcast, awaited?, state}
+//!   {kind: "chain-result", op, chain?: {root, height, fork}, fn?, txid?, status?, error?, facts?: [{event, status}], answered, broadcast, awaited?, state}
 const std = @import("std");
 const c = @import("chain");
 const vm = @import("vm.zig");
@@ -78,8 +84,10 @@ const Step = struct {
     /// Transactions this thread rests on after the step.
     awaited: std.ArrayList([32]u8) = .empty,
     writes: bool = true,
-    /// A proof event's `via` (it came by a route's wiring, not the host's broadcaster).
+    /// A proof event's `via` (it came by a route's wiring, not the host's broadcaster): on the result record.
     via: ?[]const u8 = null,
+    /// The transaction an ingest came to (0.8.0): its status at the ingest is a fact too.
+    ingested: ?[32]u8 = null,
 
     fn field(self: *Step, key: []const u8, v: Value) !void {
         try self.fields.append(self.a, .{ .key = key, .value = v });
@@ -133,12 +141,21 @@ fn run(a: Allocator) anyerror!void {
         try onMessage(&p, args, try s.getValue(a, bc));
     } else return error.BadInput;
 
-    // A reorg this step turned proven transactions back to unproven: nothing is sent anywhere (0.7.1, the
-    // settled sync design, David 2026-10-30: "I see no value in rebroadcast"). The new proof arrives as
-    // the first did: the host's status feed carries every transaction under its token, a new blockHash is
-    // a new status, routed as a proof event; that step answers every watcher.
-    // Every state change of a watched transaction: an answer to each watcher (a proof after a reorg: again).
-    for (try shape.changeAnswers(a, &p.st, p.via)) |x| try p.answer(x.to, x.box, x.body);
+    // 0.8.0 (David 2026-11-09): every status of a transaction this step came to — accepted, rejected,
+    // mined (with its height), reorged — is recorded (the state) and emitted as the fact
+    // `<app>/tx/<txid>` {status, height?}; no watchers. A reorg this step turned proven transactions
+    // back to unproven is broadcast nowhere (0.7.1): the fact `reorged`; the new proof arrives as the
+    // first did, through the host's status feed, and is the fact `mined` again.
+    const facts = try shape.statusEvents(a, &p.st, conf.app, p.ingested);
+    for (facts) |e| _ = try vm.emitEvent(a, e);
+    if (facts.len > 0) {
+        const names = try a.alloc(Value, facts.len);
+        for (facts, names) |e, *nm| nm.* = .{ .map = try a.dupe(cbor.Entry, &.{
+            .{ .key = "event", .value = e.get("event").? },
+            .{ .key = "status", .value = e.get("status").? },
+        }) };
+        try p.field("facts", .{ .array = names });
+    }
 
     var new_state: ?[]const u8 = state;
     if (p.writes) {
@@ -196,6 +213,7 @@ fn onEvent(p: *Step, ev: Value) !void {
         const txid = if (ev.getCid("subject")) |s| c.store.bitcoinHash(s) orelse return error.BadEvent else c.header.fromHex(ev.getText("txid") orelse return error.BadEvent) catch return error.BadEvent;
         try p.field("txid", try p.hex(txid));
         p.via = ev.getText("via");
+        if (p.via) |v| try p.field("via", .{ .text = v });
         const outcome = p.st.applyStatus(txid, "MINED", ev.getBytes("path") orelse return error.BadEvent) catch |e| switch (e) {
             error.UnknownTransaction => {
                 try p.field("outcome", .{ .text = "unknown" });
@@ -239,7 +257,7 @@ fn onMessage(p: *Step, args: Value, body: Value) !void {
     const name = body.getText("fn") orelse "";
     try p.field("fn", .{ .text = name });
     const fargs = body.get("args") orelse Value{ .map = &.{} };
-    const outcome = callOf(p, name, fargs, sender, box, message) catch |e| Outcome{ .err = .{ .code = "failed", .message = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ @errorName(e), if (vm.lastError().len > 0) ": " else "", vm.lastError() }) } };
+    const outcome = callOf(p, name, fargs) catch |e| Outcome{ .err = .{ .code = "failed", .message = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ @errorName(e), if (vm.lastError().len > 0) ": " else "", vm.lastError() }) } };
     switch (outcome) {
         .none => {},
         .ok => |v| if (sender) |s| try p.answer(s, box, try shape.answerBody(a, name, message, .{ .ok = v })),
@@ -252,7 +270,7 @@ fn onMessage(p: *Step, args: Value, body: Value) !void {
 
 const Outcome = union(enum) { none, ok: Value, err: shape.Failure };
 
-fn callOf(p: *Step, name: []const u8, fargs: Value, sender: ?[]const u8, box: []const u8, message: []const u8) !Outcome {
+fn callOf(p: *Step, name: []const u8, fargs: Value) !Outcome {
     const a = p.a;
     const f = shape.Fn.parse(name) orelse {
         p.writes = false;
@@ -284,12 +302,13 @@ fn callOf(p: *Step, name: []const u8, fargs: Value, sender: ?[]const u8, box: []
             try p.field("txid", try p.hex(got.txid));
             try p.field("status", .{ .text = @tagName(got.status) });
             for (got.registered) |t| try p.to_broadcast.append(a, t);
+            // 0.8.0: no watchers. Its status at the ingest is a fact (`<app>/tx/<txid>`, statusEvents), as
+            // every later one is; the caller is answered once, here, when there is a status to answer.
+            p.ingested = got.txid;
             switch (got.status) {
                 // Proven or rejected in: answered at once.
                 .proven, .rejected => return .{ .ok = try shape.txState(a, &p.st, got.txid, null, "") },
                 .unproven => {
-                    // Answered on each state change from now on; at once if it is accepted already.
-                    if (sender) |s| try p.st.watch(got.txid, s, box, message);
                     const r = (try p.st.broadcastRecord(got.txid)).?;
                     if (r.getBool("accepted") orelse false) return .{ .ok = try shape.txState(a, &p.st, got.txid, "accepted", "") };
                     return .none;
@@ -303,7 +322,7 @@ fn callOf(p: *Step, name: []const u8, fargs: Value, sender: ?[]const u8, box: []
 fn onCall(a: Allocator, in: Value) !void {
     const name = in.getText("fn") orelse "";
     const f = shape.Fn.parse(name) orelse return error.UnknownFn;
-    if (f.writes()) return error.IngestIsAMessage; // its answers come later, at the caller's address
+    if (f.writes()) return error.IngestIsAMessage; // it writes: a message, answered at the caller's address
     const arg = try cbor.decode(a, in.getBytes("arg") orelse return error.BadInput);
     const txid = (try shape.txidArg(arg)) orelse return error.BadArgs;
     // The state head of the app named "chain" (a call names no program; the name is the app's identity).
