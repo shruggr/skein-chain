@@ -36,7 +36,8 @@
 //! emitted as the fact `<app>/tx/<txid>` (skein 0.5.0's event index; listeners rest on the name,
 //! skein 0.5.4): `{status: "accepted"}` (the first status that is not a rejection), `{status:
 //! "mined", height}` (its proof, on our best chain; again in another block after a reorg),
-//! `{status: "rejected"}` (the settlement record says why), `{status: "reorged"}` (a reorg turned
+//! `{status: "rejected"}` (the settlement record says why; 0.9.0: a later proof is `mined` all the
+//! same — the latest fact, skein-sdk 0.18.0), `{status: "reorged"}` (a reorg turned
 //! it back to unproven). An ingest emits the subject's status as it stands (mined, rejected,
 //! accepted; nothing while it is only broadcast). The watchers list is gone.
 //!

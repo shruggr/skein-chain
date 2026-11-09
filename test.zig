@@ -230,3 +230,35 @@ test "rejected (0.8.0): a rejection is the fact `rejected`, once" {
     try std.testing.expectEqual(@as(usize, 1), facts.len);
     try expectFact(facts[0], child.txid, "rejected", null);
 }
+
+test "a proof after a rejection (0.9.0, skein-sdk 0.18.0): the latest fact — `mined` with its height; the rejection's reason kept in state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    const State = c.state.State;
+    const fund = try funding(a);
+    const h1 = mine(c.header.hash(&c.chain.Network.regtest.genesis()), fund.txid, 1_700_000_600);
+    var st = try State.load(a, ms.store(), null, .regtest);
+    _ = try st.addHeaders(&.{&h1});
+    const child = try spend(a, &fund.tx);
+    var bumps = [_]c.bsvz.spv.MerklePath{try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 1, fund.txid))};
+    var entries = [_]c.beef.Entry{
+        .{ .txid = fund.txid, .format = .raw_with_bump, .bump = 0, .raw = fund.raw, .tx = fund.tx },
+        .{ .txid = child.txid, .format = .raw, .raw = child.raw, .tx = child.tx },
+    };
+    const beef = try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = child.txid, .bumps = &bumps, .entries = &entries });
+    _ = try st.ingest(beef);
+    try std.testing.expectEqual(State.Outcome.rejected, try st.applyStatus(child.txid, "DOUBLE_SPEND_ATTEMPTED", null));
+    const rejected = try st.save();
+
+    var st2 = try State.load(a, ms.store(), rejected, .regtest);
+    const h2 = mine(c.header.hash(&h1), child.txid, 1_700_001_200);
+    _ = try st2.addHeaders(&.{&h2});
+    try std.testing.expectEqual(State.Outcome.proven, try st2.applyStatus(child.txid, "MINED", try soloPath(a, 2, child.txid)));
+    const facts = try shape.statusEvents(a, &st2, "chain", null);
+    try std.testing.expectEqual(@as(usize, 1), facts.len);
+    try expectFact(facts[0], child.txid, "mined", 2);
+    try std.testing.expectEqualStrings("DOUBLE_SPEND_ATTEMPTED", (try st2.record((try st2.settlementCid(child.txid)).?)).getText("reason").?);
+}

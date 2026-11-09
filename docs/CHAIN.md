@@ -1,4 +1,4 @@
-# The chain app (0.8.0)
+# The chain app (0.9.0)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an
@@ -165,6 +165,8 @@ event `{event: "broadcast", tx: <its CID>, beef: <its Atomic BEEF>}`
 (skein docs/MESSAGES.md), which the host carries to its network — and the
 thread rests awaiting them, with no deadline; after each step it rests
 again on those still unproven.
+
+**A status is the latest fact** (0.9.0, David 2026-11-09): a valid proof for a transaction makes it proven and emits `mined`, also when it was rejected before (skein-sdk 0.18.0: the `rejected` map no longer overrides a proof; the settlement record stays, read for its reason).
 
 **Every status is a fact** (0.8.0, David 2026-11-09). Each status of a
 transaction a step comes to is recorded (the state above) and emitted as the
