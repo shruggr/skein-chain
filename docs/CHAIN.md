@@ -202,7 +202,26 @@ its own `<app>/proof/<txid>` (beside `outputs` on `<app>/tx/<txid>`): covered al
 intake is `mined` (read from the state) and it is never registered for broadcast; linked later, the
 subscription step settles what the proof settles (double spends, its broadcast record) and raises
 `<app>/tx/<txid>` `mined` with its height when the latest fact is not already that. Our own outgoing
-BEEF carries a linked transaction proven (raw with its BUMP). Reorgs are as in 0.10.0 (inline).
+BEEF carries a linked transaction proven (raw with its BUMP).
+
+**Every dependency by subscription** (0.11.0, David 2026-11-10: "Everything is registered with
+events. There shouldn't be any way you can't re-examine them."). Each wake re-reads the state.
+
+| dependency | subscribed | fn | re-reads |
+|---|---|---|---|
+| a transaction's status on its proof | `<app>/proof/<txid>` (at intake) | `proof` | the linkage; settles its broadcast record, double spends, inputs' spent; raises `mined` |
+| an output's state on its spender's status | `<app>/tx/<txid>` (at intake) | `outputs` | each output it spends: the live spender |
+| a transaction on its parents | `<app>/tx/<parent>` for each input's transaction (at intake) | `parents` | every held child of that parent: `input-rejected` by the root when a parent is rejected; `revived` (pending, broadcast again) when none is |
+| a mined transaction on its block | `<app>/block/<hash>` (when its `mined` is raised) | `block` | every held transaction linked to that block: `seen`/`reorged`, or `mined` again |
+
+`<app>/block/<hash>` `{height, active}` is raised when a block a linkage names leaves our best chain
+(`active: false`) or comes back (`active: true`). A rejection rejects only its own transaction, and
+never one with a proven descendant (a proven child proves its parents mined). A proof overrides a
+rejection, also after a reorg: the settlement leaves `rejected` (its linkage keeps it, read for its
+reason). A proof before its header is kept whatever the transaction's status (`parked`).
+At intake a transaction is read against facts already raised (a past fact is never delivered to a
+subscription made later): covered already → `mined`, settled; a parent rejected already →
+`input-rejected`. Transactions held before 0.11.0 have none of these subscriptions: relaunch.
 
 **Output states** (0.10.0, David 2026-11-09). Each output a held transaction
 spends has a state, the fact `<app>/output/<txid hex>.<vout>`:

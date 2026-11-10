@@ -190,12 +190,15 @@ test "every status a fact (0.10.0): pending at intake (its proven parent mined),
     const h2 = mine(c.header.hash(&h1), child.txid, 1_700_001_200);
     _ = try st2.addHeaders(&.{&h2});
     try std.testing.expectEqual(State.Outcome.proven, try st2.applyStatus(child.txid, "MINED", try soloPath(a, 2, child.txid)));
-    facts = try shape.statusEvents(a, &st2, "mychain", null);
+    // 0.11.0: the step that saved the path raises the linkage; `mined` is the child's `proof` subscription step.
+    try std.testing.expectEqual(@as(usize, 0), (try shape.statusEvents(a, &st2, "chain", null)).len);
+    try std.testing.expect(factFor(try shape.proofEvents(a, &st2, "mychain"), "mychain/proof/", child.txid) != null);
+    var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+    try ix.latest.put(try shape.txName(a, "chain", child.txid), try shape.statusEvent(a, "chain", child.txid, "seen", null, null, null));
+    facts = try shape.provenFacts(a, &st2, "chain", child.txid, ix.reader());
     try std.testing.expectEqual(@as(usize, 1), facts.len);
-    try std.testing.expect(std.mem.startsWith(u8, facts[0].getText("event").?, "mychain/tx/"));
-    try std.testing.expectEqual(@as(?u64, 2), facts[0].getUint("height"));
-    facts = try shape.statusEvents(a, &st2, "chain", null);
     try expectFact(facts[0], child.txid, "mined", 2);
+    try ix.latest.put(facts[0].getText("event").?, facts[0]);
     const proven = try st2.save();
 
     // A heavier branch without it: reorged (no broadcast, no other fact).
@@ -203,10 +206,18 @@ test "every status a fact (0.10.0): pending at intake (its proven parent mined),
     const alt2 = mine(c.header.hash(&h1), .{3} ** 32, 1_700_001_201);
     const alt3 = mine(c.header.hash(&alt2), .{4} ** 32, 1_700_001_202);
     _ = try st3.addHeaders(&.{ &alt2, &alt3 });
-    facts = try shape.statusEvents(a, &st3, "chain", null);
+    // 0.11.0: the step that moved the chain raises the block's fact; `seen`/`reorged` is the block's
+    // subscription step.
+    try std.testing.expectEqual(@as(usize, 0), (try shape.statusEvents(a, &st3, "chain", null)).len);
+    const bev = try shape.blockEvents(a, &st3, "chain");
+    try std.testing.expectEqual(@as(usize, 1), bev.len);
+    try std.testing.expectEqual(false, bev[0].getBool("active").?);
+    facts = try shape.blockFacts(a, &st3, "chain", c.header.hash(&h2), 2, ix.reader());
     try std.testing.expectEqual(@as(usize, 1), facts.len);
     try expectFact(facts[0], child.txid, "seen", null);
     try std.testing.expectEqualStrings("reorged", facts[0].getText("reason").?);
+    try ix.latest.put(facts[0].getText("event").?, facts[0]);
+    try std.testing.expectEqual(@as(usize, 0), (try shape.blockFacts(a, &st3, "chain", c.header.hash(&h2), 2, ix.reader())).len); // woken again: nothing
     const reverted = try st3.save();
 
     // Proven again at height 4, another block: mined again, with its height.
@@ -214,7 +225,7 @@ test "every status a fact (0.10.0): pending at intake (its proven parent mined),
     const alt4 = mine(c.header.hash(&alt3), child.txid, 1_700_001_203);
     _ = try st4.addHeaders(&.{&alt4});
     try std.testing.expectEqual(State.Outcome.proven, try st4.applyStatus(child.txid, "MINED", try soloPath(a, 4, child.txid)));
-    facts = try shape.statusEvents(a, &st4, "chain", null);
+    facts = try shape.provenFacts(a, &st4, "chain", child.txid, ix.reader());
     try std.testing.expectEqual(@as(usize, 1), facts.len);
     try expectFact(facts[0], child.txid, "mined", 4);
     // Ingested again, proven: `mined` as it stands.
@@ -277,7 +288,8 @@ test "a proof after a rejection (0.9.0, skein-sdk 0.18.0): the latest fact — `
     const h2 = mine(c.header.hash(&h1), child.txid, 1_700_001_200);
     _ = try st2.addHeaders(&.{&h2});
     try std.testing.expectEqual(State.Outcome.proven, try st2.applyStatus(child.txid, "MINED", try soloPath(a, 2, child.txid)));
-    const facts = try shape.statusEvents(a, &st2, "chain", null);
+    var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+    const facts = try shape.provenFacts(a, &st2, "chain", child.txid, ix.reader()); // its `proof` subscription step
     try std.testing.expectEqual(@as(usize, 1), facts.len);
     try expectFact(facts[0], child.txid, "mined", 2);
     try std.testing.expectEqualStrings("DOUBLE_SPEND_ATTEMPTED", (try st2.record((try st2.settlementCid(child.txid)).?)).getText("reason").?);
@@ -372,7 +384,13 @@ test "two spenders (0.10.0): A taken in (spent by A); a proven B — A rejected 
     const tb = try spendOther(a, &fund.tx);
     _ = try st2.addHeaders(&.{&mine(c.header.hash(&h1), tb.txid, 1_700_001_200)});
     const g2 = try st2.ingest(try beefOver(a, fund, tb, 2, &.{}));
-    const facts = try shape.statusEvents(a, &st2, "chain", g2.txid);
+    const intake = try shape.statusEvents(a, &st2, "chain", g2.txid); // B mined at intake
+    try expectFact(try factOf(intake, tb.txid), tb.txid, "mined", 2);
+    // 0.11.0: A's double spend is settled in B's `proof` subscription step.
+    var lx = Index{ .latest = std.StringHashMap(Value).init(a) };
+    for (intake) |f| try lx.latest.put(f.getText("event").?, f);
+    const settled = try shape.provenFacts(a, &st2, "chain", tb.txid, lx.reader());
+    const facts = try std.mem.concat(a, Value, &.{ intake, settled });
     const fa = try factOf(facts, ta.txid);
     try expectFact(fa, ta.txid, "rejected", null);
     try std.testing.expectEqualStrings("double-spent", fa.getText("reason").?);
@@ -430,7 +448,8 @@ test "rolled back (0.10.0): the only spender rejected by the network — the out
     var st3 = try State.load(a, ms.store(), s2, .regtest);
     _ = try st3.addHeaders(&.{&mine(c.header.hash(&h1), ta.txid, 1_700_001_200)});
     _ = try st3.applyStatus(ta.txid, "MINED", try soloPath(a, 2, ta.txid));
-    try ix.deliver(a, &st3, try shape.statusEvents(a, &st3, "chain", null));
+    var lx = Index{ .latest = std.StringHashMap(Value).init(a) };
+    try ix.deliver(a, &st3, try shape.provenFacts(a, &st3, "chain", ta.txid, lx.reader())); // its `proof` step
     try expectOutput(try ix.state(a, fund.txid, 0), "spent", ta.txid);
 }
 
@@ -574,9 +593,11 @@ test "0.11.0 a proof after the transaction: X held pending, P's path arrives —
     const proofs = try shape.proofEvents(a, &st2, "chain");
     try std.testing.expect(factFor(proofs, "chain/proof/", z.x.txid) != null);
     const step_facts = try shape.statusEvents(a, &st2, "chain", null);
-    try expectFact(factFor(step_facts, "chain/tx/", z.p.txid).?, z.p.txid, "mined", 2);
-    try std.testing.expect(factFor(step_facts, "chain/tx/", z.x.txid) == null); // X's comes by its subscription
-    for (step_facts) |f| try ix.latest.put(f.getText("event").?, f);
+    try std.testing.expect(factFor(step_facts, "chain/tx/", z.p.txid) == null); // P's and X's come by their subscriptions
+    try std.testing.expect(factFor(step_facts, "chain/tx/", z.x.txid) == null);
+    const pp = try shape.provenFacts(a, &st2, "chain", z.p.txid, ix.reader());
+    try expectFact(factFor(pp, "chain/tx/", z.p.txid).?, z.p.txid, "mined", 2);
+    for (pp) |f| try ix.latest.put(f.getText("event").?, f);
     const s2 = try st2.save();
 
     // X's `proof` subscription step.
@@ -621,4 +642,99 @@ test "0.11.0 held rejected, then a path covering it: the subscription step raise
     const pf = try shape.provenFacts(a, &st3, "chain", z.x.txid, ix.reader());
     try std.testing.expectEqual(@as(usize, 1), pf.len);
     try expectFact(pf[0], z.x.txid, "mined", 2);
+}
+
+// ------------------------------------------------------------ 0.11.0 phase 2: parents and blocks by subscription
+
+test "0.11.0 parents: P rejected — X (P's child) rejected input-rejected in P's step, C (X's child) in X's; P proven covering X — X mined, C revived (pending, broadcast again)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    var st = try c.state.State.load(a, ms.store(), null, .regtest);
+    const z = try liveWorld(a, &st);
+    var bumps = [_]c.bsvz.spv.MerklePath{try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 1, z.fund.txid))};
+    var e1 = [_]c.beef.Entry{
+        .{ .txid = z.fund.txid, .format = .raw_with_bump, .bump = 0, .raw = z.fund.raw, .tx = z.fund.tx },
+        .{ .txid = z.p.txid, .format = .raw, .raw = z.p.raw, .tx = z.p.tx },
+        .{ .txid = z.x.txid, .format = .raw, .raw = z.x.raw, .tx = z.x.tx },
+        .{ .txid = z.cc.txid, .format = .raw, .raw = z.cc.raw, .tx = z.cc.tx },
+    };
+    _ = try st.ingest(try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = z.cc.txid, .bumps = &bumps, .entries = &e1 }));
+    const s0 = try st.save();
+
+    var st1 = try c.state.State.load(a, ms.store(), s0, .regtest);
+    _ = try st1.applyStatus(z.p.txid, "REJECTED", null);
+    const f0 = try shape.statusEvents(a, &st1, "chain", null);
+    try expectFact(factFor(f0, "chain/tx/", z.p.txid).?, z.p.txid, "rejected", null);
+    try std.testing.expect(factFor(f0, "chain/tx/", z.x.txid) == null); // no walk at the source
+    const fx = try shape.parentFacts(a, &st1, "chain", z.p.txid); // P's fact steps `parents`
+    const rx = factFor(fx, "chain/tx/", z.x.txid).?;
+    try expectFact(rx, z.x.txid, "rejected", null);
+    try std.testing.expectEqualStrings("input-rejected", rx.getText("reason").?);
+    try std.testing.expectEqualStrings(&c.header.toHex(z.p.txid), rx.getText("by").?);
+    const s1 = try st1.save();
+    var st1b = try c.state.State.load(a, ms.store(), s1, .regtest);
+    const fc = try shape.parentFacts(a, &st1b, "chain", z.x.txid); // X's fact steps `parents`
+    const rc = factFor(fc, "chain/tx/", z.cc.txid).?;
+    try expectFact(rc, z.cc.txid, "rejected", null);
+    try std.testing.expectEqualStrings(&c.header.toHex(z.p.txid), rc.getText("by").?); // the root
+    const s2 = try st1b.save();
+
+    // P mined in block 2 with X: the path links both; X's `proof` step: mined (its input-rejected overridden).
+    var st2 = try c.state.State.load(a, ms.store(), s2, .regtest);
+    _ = try st2.applyStatus(z.p.txid, "MINED", try pairBytes(a, 2, z.p.txid, z.x.txid));
+    var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+    try ix.latest.put(try shape.txName(a, "chain", z.x.txid), rx);
+    const px = try shape.provenFacts(a, &st2, "chain", z.x.txid, ix.reader());
+    try expectFact(factFor(px, "chain/tx/", z.x.txid).?, z.x.txid, "mined", 2);
+    // X's fact steps `parents`: C revived — pending, its broadcast registered again (the chain app broadcasts it).
+    const fr = try shape.parentFacts(a, &st2, "chain", z.x.txid);
+    try expectFact(factFor(fr, "chain/tx/", z.cc.txid).?, z.cc.txid, "pending", null);
+    try std.testing.expectEqual(@as(usize, 1), st2.revived.items.len);
+    try std.testing.expectEqualSlices(u8, &z.cc.txid, &st2.revived.items[0]);
+}
+
+test "0.11.0 block out and back by subscription: seen/reorged when it leaves, mined again when it returns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    const fund = try funding(a);
+    const h1 = mine(c.header.hash(&c.chain.Network.regtest.genesis()), fund.txid, 1_700_000_600);
+    const child = try spend(a, &fund.tx);
+    const h2 = mine(c.header.hash(&h1), child.txid, 1_700_001_200);
+    var st = try c.state.State.load(a, ms.store(), null, .regtest);
+    _ = try st.addHeaders(&.{ &h1, &h2 });
+    var bumps = [_]c.bsvz.spv.MerklePath{ try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 1, fund.txid)), try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 2, child.txid)) };
+    var e1 = [_]c.beef.Entry{
+        .{ .txid = fund.txid, .format = .raw_with_bump, .bump = 0, .raw = fund.raw, .tx = fund.tx },
+        .{ .txid = child.txid, .format = .raw_with_bump, .bump = 1, .raw = child.raw, .tx = child.tx },
+    };
+    _ = try st.ingest(try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = child.txid, .bumps = &bumps, .entries = &e1 }));
+    var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+    for (try shape.statusEvents(a, &st, "chain", child.txid)) |f| try ix.latest.put(f.getText("event").?, f);
+    const s1 = try st.save();
+    // Out.
+    var st2 = try c.state.State.load(a, ms.store(), s1, .regtest);
+    const alt2 = mine(c.header.hash(&h1), .{3} ** 32, 1_700_001_201);
+    const alt3 = mine(c.header.hash(&alt2), .{4} ** 32, 1_700_001_202);
+    _ = try st2.addHeaders(&.{ &alt2, &alt3 });
+    const out = try shape.blockFacts(a, &st2, "chain", c.header.hash(&h2), 2, ix.reader());
+    try expectFact(factFor(out, "chain/tx/", child.txid).?, child.txid, "seen", null);
+    for (out) |f| try ix.latest.put(f.getText("event").?, f);
+    const s2 = try st2.save();
+    // Back: the first branch heavier again (in one run from the fork).
+    var st3 = try c.state.State.load(a, ms.store(), s2, .regtest);
+    const h3 = mine(c.header.hash(&h2), .{5} ** 32, 1_700_001_203);
+    const h4 = mine(c.header.hash(&h3), .{6} ** 32, 1_700_001_204);
+    _ = try st3.addHeaders(&.{ &h2, &h3, &h4 });
+    const bev = try shape.blockEvents(a, &st3, "chain");
+    try std.testing.expectEqual(@as(usize, 1), bev.len);
+    try std.testing.expectEqual(true, bev[0].getBool("active").?);
+    const back = try shape.blockFacts(a, &st3, "chain", c.header.hash(&h2), 2, ix.reader());
+    try expectFact(factFor(back, "chain/tx/", child.txid).?, child.txid, "mined", 2);
+    try std.testing.expect((try st3.broadcastRecord(child.txid)) == null);
 }

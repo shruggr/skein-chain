@@ -232,11 +232,12 @@ pub fn statusEvents(a: Allocator, st: *State, app: []const u8, ingested: ?[32]u8
             try o.append(al, ev);
         }
     }.f;
-    for (st.reverted.items) |t| try add(a, &said, &out, t, try statusEvent(a, app, t, "seen", null, "reorged", null));
     for (st.changes.items) |ch| try add(a, &said, &out, ch.txid, switch (ch.state) {
         .accepted => try statusEvent(a, app, ch.txid, "seen", null, null, null),
         .proven => try statusEvent(a, app, ch.txid, "mined", try minedHeight(st, ch.txid), null, null),
         .rejected => try statusEvent(a, app, ch.txid, "rejected", null, ch.detail, ch.by),
+        // 0.11.0: an `input-rejected` that no longer holds: its status as the state has it now.
+        .revived => try statusNow(a, st, app, ch.txid),
     });
     for (st.added.items) |t| try add(a, &said, &out, t, try statusNow(a, st, app, t));
     if (ingested) |t| if (try st.holds(t)) try add(a, &said, &out, t, try statusNow(a, st, app, t));
@@ -280,6 +281,61 @@ pub fn provenFacts(a: Allocator, st: *State, app: []const u8, t: [32]u8, latest:
         if (!same) try out.append(a, now);
     }
     return out.items;
+}
+
+/// The fact name of a block's place on our best chain (0.11.0): `<app>/block/<block hash hex>`.
+pub fn blockName(a: Allocator, app: []const u8, hash: [32]u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}/block/{s}", .{ app, &c.header.toHex(hash) });
+}
+
+/// The blocks this step found moved (0.11.0, skein-sdk `State.blocks`: a block a linkage names that
+/// left our best chain or came back), as facts: `{event: "<app>/block/<hash>", height, active}`.
+pub fn blockEvents(a: Allocator, st: *State, app: []const u8) ![]Value {
+    const out = try a.alloc(Value, st.blocks.items.len);
+    for (st.blocks.items, out) |b, *v| v.* = .{ .map = try a.dupe(cbor.Entry, &.{
+        .{ .key = "event", .value = .{ .text = try blockName(a, app, b.hash) } },
+        .{ .key = "height", .value = .{ .uint = b.height } },
+        .{ .key = "active", .value = .{ .boolean = b.active } },
+    }) };
+    return out;
+}
+
+/// Whether the latest fact under `<app>/tx/<t>` is `mined` at `height` (null: any height).
+fn latestIsMined(a: Allocator, app: []const u8, t: [32]u8, latest: Latest, height: ?u64) !bool {
+    const last = (try latest.of(a, try txName(a, app, t))) orelse return false;
+    if (!eql(u8, last.getText("status") orelse "", "mined")) return false;
+    return if (height) |h| last.getUint("height") == h else true;
+}
+
+/// A block's `<app>/block/<hash>` subscription step (0.11.0): every held transaction linked to it,
+/// re-read from the state (skein-sdk `blockChanged`) — proven (it came back): `mined` at its height
+/// unless the latest fact is that already; unproven (it left): `seen`, reason `reorged`, when the
+/// latest fact was `mined`. Plus every other status the step's settling changed.
+pub fn blockFacts(a: Allocator, st: *State, app: []const u8, hash: [32]u8, height: u32, latest: Latest) ![]Value {
+    const moved = try st.blockChanged(hash, height);
+    var out: std.ArrayList(Value) = .empty;
+    for (try statusEvents(a, st, app, null)) |e| {
+        var own = false;
+        for (moved) |m| own = own or eql(u8, e.getText("event").?, try txName(a, app, m.txid));
+        if (!own) try out.append(a, e);
+    }
+    for (moved) |m| {
+        if (m.proven) {
+            const now = try statusNow(a, st, app, m.txid);
+            if (!(try latestIsMined(a, app, m.txid, latest, now.getUint("height")))) try out.append(a, now);
+        } else if (try latestIsMined(a, app, m.txid, latest, null)) {
+            try out.append(a, try statusEvent(a, app, m.txid, "seen", null, "reorged", null));
+        }
+    }
+    return out.items;
+}
+
+/// A parent's `<app>/tx/<parent>` subscription step (0.11.0): every held transaction spending one of
+/// its outputs, re-derived from the state (skein-sdk `reexamine`: `input-rejected` by the root, or
+/// no longer — `revived`), as facts.
+pub fn parentFacts(a: Allocator, st: *State, app: []const u8, parent: [32]u8) ![]Value {
+    for (try st.spendersOfTx(parent)) |child| _ = try st.reexamine(child);
+    return statusEvents(a, st, app, null);
 }
 
 /// What a transaction's answer to an in-VM `ingest` call is (0.10.0): its status in the four

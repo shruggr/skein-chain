@@ -49,7 +49,10 @@
 //! Proof linkages (0.11.0): every transaction a saved path covers is raised once as
 //! `<app>/proof/<txid>` {block, height, position} (skein-sdk 0.21.0 `State.linked`); a transaction
 //! taken in subscribes its fn `proof` to it; that step settles what the proof settles and raises
-//! `<app>/tx/<txid>` mined (shape.provenFacts).
+//! `<app>/tx/<txid>` mined (shape.provenFacts). Every other dependency likewise, re-read from the
+//! state on each wake: `parents` on each input's `<app>/tx/<parent>` (shape.parentFacts:
+//! input-rejected by the root, or revived and broadcast again), `block` on a mined transaction's
+//! `<app>/block/<hash>` (shape.blockFacts: seen/reorged, or mined again).
 //!
 //! `ingest` is also an in-VM call (0.10.0): from a program's step, the app writes, subscribes,
 //! emits the statuses and the broadcast in that step (`ingestCall`).
@@ -131,6 +134,9 @@ fn run(a: Allocator) anyerror!void {
     if (eql(u8, args.getText("fn") orelse "", OUTPUTS_FN) and args.getCid("event") != null) return onOutputs(a, &p, args);
     // 0.11.0: a linkage fact of a transaction we hold steps the subscription made when it was taken in.
     if (eql(u8, args.getText("fn") orelse "", PROOF_FN) and args.getCid("event") != null) return onProven(a, &p, args, state, head_name);
+    // 0.11.0: a parent's status fact, and a block's place, step the subscriptions made for what depends on them.
+    if (eql(u8, args.getText("fn") orelse "", PARENTS_FN) and args.getCid("event") != null) return onParents(a, &p, args, state, head_name);
+    if (eql(u8, args.getText("fn") orelse "", BLOCK_FN) and args.getCid("event") != null) return onBlock(a, &p, args, state, head_name);
 
     const woke = in.getBool("woke") orelse false;
     if (in.get("event") != null or in.get("message") != null or woke) {
@@ -169,10 +175,12 @@ fn run(a: Allocator) anyerror!void {
     // 0.10.0: each transaction newly held is tied to its outputs' states: its status fact steps
     // `outputs` (subscribed here; a subscription made in this step hears this step's facts too).
     try subscribeAdded(a, &p.st, conf.app);
-    // 0.11.0: every linkage a saved path established this step is a fact, `<app>/proof/<txid>`.
+    // 0.11.0: every linkage a saved path established this step is a fact, `<app>/proof/<txid>`;
+    // every block a linkage names that moved, `<app>/block/<hash>`.
     for (try shape.proofEvents(a, &p.st, conf.app)) |e| _ = try vm.emitEvent(a, e);
+    for (try shape.blockEvents(a, &p.st, conf.app)) |e| _ = try vm.emitEvent(a, e);
     const facts = try shape.statusEvents(a, &p.st, conf.app, p.ingested);
-    for (facts) |e| _ = try vm.emitEvent(a, e);
+    try raise(a, &p.st, conf.app, facts);
     if (facts.len > 0) {
         const names = try a.alloc(Value, facts.len);
         for (facts, names) |e, *nm| nm.* = .{ .map = try a.dupe(cbor.Entry, &.{
@@ -227,39 +235,101 @@ const OUTPUTS_FN = "outputs";
 /// The function the app subscribes, per transaction taken in, to its linkage fact `<app>/proof/<txid>`.
 const PROOF_FN = "proof";
 
-/// 0.10.0: every transaction this step newly held — its status fact steps `outputs`. 0.11.0: and its
-/// linkage fact steps `proof` (a linkage made in this step too: a subscription made in a step hears
-/// that step's facts; one made before it is read at intake — the status at intake is the state's).
+/// The function the app subscribes, per input transaction of a transaction taken in, to that
+/// parent's status fact `<app>/tx/<parent>` (one subscription per parent: it steps all its children).
+const PARENTS_FN = "parents";
+
+/// The function the app subscribes, per block a mined transaction is in, to `<app>/block/<hash>`.
+const BLOCK_FN = "block";
+
+/// 0.10.0: every transaction this step newly held — its status fact steps `outputs`. 0.11.0: its
+/// linkage fact steps `proof`, and each of its parents' status facts steps `parents` (a fact made in
+/// this step too: a subscription made in a step hears that step's facts; one made before it is read
+/// at intake — the status at intake is the state's).
 fn subscribeAdded(a: Allocator, st: *State, app: []const u8) !void {
     for (st.added.items) |t| {
         try vm.on(try shape.txName(a, app, t), OUTPUTS_FN);
         try vm.on(try shape.proofName(a, app, t), PROOF_FN);
+        const raw = (try st.txRaw(t)) orelse continue;
+        const tx = try c.bsvz.transaction.Transaction.parse(a, raw);
+        for (tx.inputs) |in| {
+            const prev = in.previous_outpoint;
+            if (prev.index == 0xffffffff and std.mem.allEqual(u8, &prev.txid.bytes, 0)) continue;
+            try vm.on(try shape.txName(a, app, prev.txid.bytes), PARENTS_FN); // the kernel keeps one per name
+        }
     }
+}
+
+/// Emit status facts; a `mined` one ties its transaction to its block: `<app>/block/<hash>` steps
+/// `block` (one subscription per block: it steps every transaction mined in it).
+fn raise(a: Allocator, st: *State, app: []const u8, facts: []const Value) !void {
+    for (facts) |e| {
+        _ = try vm.emitEvent(a, e);
+        if (!eql(u8, e.getText("status") orelse "", "mined")) continue;
+        const name = e.getText("event").?;
+        const t = c.header.fromHex(name[(std.mem.lastIndexOfScalar(u8, name, '/') orelse continue) + 1 ..]) catch continue;
+        if (try st.proofBlock(t)) |b| try vm.on(try shape.blockName(a, app, b), BLOCK_FN);
+    }
+}
+
+fn latestReader() shape.Latest {
+    const S = struct {
+        var dummy: u8 = 0;
+        fn f(_: *anyopaque, al: Allocator, n: []const u8) anyerror!?Value {
+            return vm.latestEvent(al, n);
+        }
+    };
+    return .{ .ptr = &S.dummy, .f = S.f };
+}
+
+/// The txid or block hash a fact name ends with (`…/<hex>`).
+fn tailHash(name: []const u8) ![32]u8 {
+    return c.header.fromHex(name[(std.mem.lastIndexOfScalar(u8, name, '/') orelse return error.BadInput) + 1 ..]) catch error.BadInput;
+}
+
+/// Save the state when it changed; keep the step's result record.
+fn finishStep(a: Allocator, p: *Step, state: ?[]const u8, head_name: []const u8, op: []const u8, subject: [32]u8, n: usize) !void {
+    const new_state = try p.st.save();
+    if (state == null or !eql(u8, state.?, new_state)) try vm.advance(head_name, new_state);
+    _ = try vm.finish(a, .{ .map = try a.dupe(cbor.Entry, &.{
+        .{ .key = "kind", .value = .{ .text = "chain-result" } },
+        .{ .key = "op", .value = .{ .text = op } },
+        .{ .key = "txid", .value = try p.hex(subject) },
+        .{ .key = "facts", .value = .{ .uint = n } },
+        .{ .key = "state", .value = .{ .cid = new_state } },
+    }) });
+}
+
+/// 0.11.0: a parent's status fact — its subscription's step. Every held child is re-derived from the
+/// state; the facts raised (which step the children's own children in turn); a revived child is
+/// broadcast again.
+fn onParents(a: Allocator, p: *Step, args: Value, state: ?[]const u8, head_name: []const u8) !void {
+    const parent = try tailHash(args.getText("box") orelse return error.BadInput);
+    const facts = try shape.parentFacts(a, &p.st, p.conf.app, parent);
+    try raise(a, &p.st, p.conf.app, facts);
+    for (p.st.revived.items) |t| try vm.broadcast(a, t, (try p.st.beefOf(t)).?);
+    try finishStep(a, p, state, head_name, PARENTS_FN, parent, facts.len);
+}
+
+/// 0.11.0: a block's place changed — its subscription's step. What was mined in it is re-read from
+/// the state and its facts raised (`seen`/`reorged`, or `mined` again).
+fn onBlock(a: Allocator, p: *Step, args: Value, state: ?[]const u8, head_name: []const u8) !void {
+    const hash = try tailHash(args.getText("box") orelse return error.BadInput);
+    const rec = try vm.store().getValue(a, args.getCid("event").?);
+    const height: u32 = @intCast(rec.getUint("height") orelse return error.BadEvent);
+    const facts = try shape.blockFacts(a, &p.st, p.conf.app, hash, height, latestReader());
+    try raise(a, &p.st, p.conf.app, facts);
+    try finishStep(a, p, state, head_name, BLOCK_FN, hash, facts.len);
 }
 
 /// 0.11.0 (David 2026-11-10): a linkage fact of a transaction `t` we hold — its subscription's step.
 /// The state is read: what the linkage settles is written (double spends, its broadcast record), and
 /// `t`'s `mined` fact raised when it is proven and the latest fact is not already that.
 fn onProven(a: Allocator, p: *Step, args: Value, state: ?[]const u8, head_name: []const u8) !void {
-    const name = args.getText("box") orelse return error.BadInput;
-    const t = c.header.fromHex(name[(std.mem.lastIndexOfScalar(u8, name, '/') orelse return error.BadInput) + 1 ..]) catch return error.BadInput;
-    var dummy: u8 = 0;
-    const latest = shape.Latest{ .ptr = &dummy, .f = struct {
-        fn f(_: *anyopaque, al: Allocator, n: []const u8) anyerror!?Value {
-            return vm.latestEvent(al, n);
-        }
-    }.f };
-    const facts = try shape.provenFacts(a, &p.st, p.conf.app, t, latest);
-    for (facts) |e| _ = try vm.emitEvent(a, e);
-    const new_state = try p.st.save();
-    if (state == null or !eql(u8, state.?, new_state)) try vm.advance(head_name, new_state);
-    _ = try vm.finish(a, .{ .map = try a.dupe(cbor.Entry, &.{
-        .{ .key = "kind", .value = .{ .text = "chain-result" } },
-        .{ .key = "op", .value = .{ .text = PROOF_FN } },
-        .{ .key = "txid", .value = try p.hex(t) },
-        .{ .key = "facts", .value = .{ .uint = facts.len } },
-        .{ .key = "state", .value = .{ .cid = new_state } },
-    }) });
+    const t = try tailHash(args.getText("box") orelse return error.BadInput);
+    const facts = try shape.provenFacts(a, &p.st, p.conf.app, t, latestReader());
+    try raise(a, &p.st, p.conf.app, facts);
+    try finishStep(a, p, state, head_name, PROOF_FN, t, facts.len);
 }
 
 /// 0.10.0 (David 2026-11-09): a status fact of a transaction `t` — its subscription's step. Each output
@@ -458,7 +528,7 @@ fn ingestCall(a: Allocator, in: Value) !void {
     };
     try subscribeAdded(a, &st, conf.app);
     for (try shape.proofEvents(a, &st, conf.app)) |e| _ = try vm.emitEvent(a, e);
-    for (try shape.statusEvents(a, &st, conf.app, got.txid)) |e| _ = try vm.emitEvent(a, e);
+    try raise(a, &st, conf.app, try shape.statusEvents(a, &st, conf.app, got.txid));
     const new_state = try st.save();
     if (state == null or !eql(u8, state.?, new_state)) try vm.advance(head_name, new_state);
     for (got.registered) |t| try vm.broadcast(a, t, (try st.beefOf(t)).?);
