@@ -132,7 +132,19 @@ fn expectFact(e: Value, txid: [32]u8, status: []const u8, height: ?u64) !void {
     try std.testing.expectEqual(height, e.getUint("height"));
 }
 
-test "every status a fact (0.8.0): ingested (nothing yet), accepted, mined at 2, reorged, mined at 4 — chain/tx/<txid> each time, no watchers" {
+/// The fact about `txid` among `facts` (exactly one).
+fn factOf(facts: []const Value, txid: [32]u8) !Value {
+    var name: [64 + 9]u8 = undefined;
+    _ = try std.fmt.bufPrint(&name, "chain/tx/{s}", .{&c.header.toHex(txid)});
+    var found: ?Value = null;
+    for (facts) |f| if (std.mem.eql(u8, f.getText("event").?, &name)) {
+        try std.testing.expect(found == null);
+        found = f;
+    };
+    return found orelse error.NoFact;
+}
+
+test "every status a fact (0.10.0): pending at intake (its proven parent mined), seen, mined at 2, seen+reorged, mined at 4 — chain/tx/<txid> each time" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -153,8 +165,12 @@ test "every status a fact (0.8.0): ingested (nothing yet), accepted, mined at 2,
     };
     const beef = try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = child.txid, .bumps = &bumps, .entries = &entries });
     _ = try st.ingest(beef);
-    // Only broadcast: no status yet, no fact.
-    try std.testing.expectEqual(@as(usize, 0), (try shape.statusEvents(a, &st, "chain", child.txid)).len);
+    // 0.10.0: every transaction gets a status at intake — the funding (proven in) `mined` at 1, the
+    // child (only broadcast) `pending`.
+    const intake = try shape.statusEvents(a, &st, "chain", child.txid);
+    try std.testing.expectEqual(@as(usize, 2), intake.len);
+    try expectFact(intake[0], fund.txid, "mined", 1);
+    try expectFact(intake[1], child.txid, "pending", null);
     const ingested = try st.save();
 
     // A status accepts it.
@@ -162,7 +178,7 @@ test "every status a fact (0.8.0): ingested (nothing yet), accepted, mined at 2,
     try std.testing.expectEqual(State.Outcome.accepted, try st1.applyStatus(child.txid, "SEEN_ON_NETWORK", null));
     var facts = try shape.statusEvents(a, &st1, "chain", null);
     try std.testing.expectEqual(@as(usize, 1), facts.len);
-    try expectFact(facts[0], child.txid, "accepted", null);
+    try expectFact(facts[0], child.txid, "seen", null);
     // Ingested again, accepted already: its status as it stands, once.
     _ = try st1.ingest(beef);
     facts = try shape.statusEvents(a, &st1, "chain", child.txid);
@@ -189,7 +205,8 @@ test "every status a fact (0.8.0): ingested (nothing yet), accepted, mined at 2,
     _ = try st3.addHeaders(&.{ &alt2, &alt3 });
     facts = try shape.statusEvents(a, &st3, "chain", null);
     try std.testing.expectEqual(@as(usize, 1), facts.len);
-    try expectFact(facts[0], child.txid, "reorged", null);
+    try expectFact(facts[0], child.txid, "seen", null);
+    try std.testing.expectEqualStrings("reorged", facts[0].getText("reason").?);
     const reverted = try st3.save();
 
     // Proven again at height 4, another block: mined again, with its height.
@@ -206,7 +223,7 @@ test "every status a fact (0.8.0): ingested (nothing yet), accepted, mined at 2,
     try std.testing.expectEqual(@as(usize, 1), facts.len);
 }
 
-test "rejected (0.8.0): a rejection is the fact `rejected`, once" {
+test "rejected (0.10.0): a network rejection is the fact `rejected` with its reason, no cause, once" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -227,8 +244,11 @@ test "rejected (0.8.0): a rejection is the fact `rejected`, once" {
     _ = try st.ingest(beef);
     try std.testing.expectEqual(State.Outcome.rejected, try st.applyStatus(child.txid, "DOUBLE_SPEND_ATTEMPTED", null));
     const facts = try shape.statusEvents(a, &st, "chain", child.txid);
-    try std.testing.expectEqual(@as(usize, 1), facts.len);
-    try expectFact(facts[0], child.txid, "rejected", null);
+    try std.testing.expectEqual(@as(usize, 2), facts.len); // the funding's intake `mined`, the child once
+    const f = try factOf(facts, child.txid);
+    try expectFact(f, child.txid, "rejected", null);
+    try std.testing.expectEqualStrings("DOUBLE_SPEND_ATTEMPTED", f.getText("reason").?);
+    try std.testing.expect(f.get("by") == null);
 }
 
 test "a proof after a rejection (0.9.0, skein-sdk 0.18.0): the latest fact — `mined` with its height; the rejection's reason kept in state" {
@@ -261,4 +281,196 @@ test "a proof after a rejection (0.9.0, skein-sdk 0.18.0): the latest fact — `
     try std.testing.expectEqual(@as(usize, 1), facts.len);
     try expectFact(facts[0], child.txid, "mined", 2);
     try std.testing.expectEqualStrings("DOUBLE_SPEND_ATTEMPTED", (try st2.record((try st2.settlementCid(child.txid)).?)).getText("reason").?);
+}
+
+// ------------------------------------------------------------ 0.10.0: output states, by subscription
+
+/// The event index as the handler reads it: the latest record per name (a stand-in for `events`).
+const Index = struct {
+    latest: std.StringHashMap(Value),
+    posts: usize = 0,
+    fn reader(self: *Index) shape.Latest {
+        return .{ .ptr = self, .f = struct {
+            fn f(p: *anyopaque, _: std.mem.Allocator, name: []const u8) anyerror!?Value {
+                const ix: *Index = @ptrCast(@alignCast(p));
+                return ix.latest.get(name);
+            }
+        }.f };
+    }
+    /// The handler of every status fact a step emitted (each a step of its own: its posts land before the next).
+    fn deliver(self: *Index, a: std.mem.Allocator, st: *c.state.State, facts: []const Value) !void {
+        for (facts) |f| {
+            const name = f.getText("event").?;
+            const t = try c.header.fromHex(name[std.mem.lastIndexOfScalar(u8, name, '/').? + 1 ..]);
+            for (try shape.outputEvents(a, st, "chain", t, self.reader())) |e| {
+                try self.latest.put(e.getText("event").?, e);
+                self.posts += 1;
+            }
+        }
+    }
+    fn state(self: *Index, a: std.mem.Allocator, txid: [32]u8, vout: u32) !?Value {
+        return self.latest.get(try shape.outputName(a, "chain", txid, vout));
+    }
+};
+
+fn expectOutput(v: ?Value, state: []const u8, by: [32]u8) !void {
+    try std.testing.expectEqualStrings(state, v.?.getText("state").?);
+    try std.testing.expectEqualStrings(&c.header.toHex(by), v.?.getText("spentBy").?);
+}
+
+/// A second spend of the funding's output (another amount: another txid).
+fn spendOther(a: std.mem.Allocator, src: *const c.bsvz.transaction.Transaction) !Tx {
+    const bsvz = c.bsvz;
+    var b = bsvz.transaction.Builder.init(a);
+    try b.addInputFromTx(src, 0);
+    try b.addOutput(.{ .satoshis = 8_000, .locking_script = bsvz.script.Script.init(try a.dupe(u8, &(try p2pkh()))) });
+    var tx = try b.build();
+    const key = try bsvz.crypto.PrivateKey.fromBytes(priv);
+    const prev = src.outputs[0];
+    const u = try bsvz.transaction.templates.p2pkh_spend.signAndBuildUnlockingScript(a, &tx, 0, prev.locking_script, prev.satoshis, key, bsvz.transaction.templates.p2pkh_spend.default_scope);
+    @constCast(tx.inputs)[0].unlocking_script = u;
+    const raw = try tx.serialize(a);
+    return .{ .tx = tx, .raw = raw, .txid = c.beef.txidOf(raw) };
+}
+
+fn beefOver(a: std.mem.Allocator, fund: Tx, proven: ?Tx, proven_h: u32, rest: []const Tx) ![]const u8 {
+    var bumps: std.ArrayList(c.bsvz.spv.MerklePath) = .empty;
+    var entries: std.ArrayList(c.beef.Entry) = .empty;
+    try bumps.append(a, try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 1, fund.txid)));
+    try entries.append(a, .{ .txid = fund.txid, .format = .raw_with_bump, .bump = 0, .raw = fund.raw, .tx = fund.tx });
+    if (proven) |p| {
+        try bumps.append(a, try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, proven_h, p.txid)));
+        try entries.append(a, .{ .txid = p.txid, .format = .raw_with_bump, .bump = 1, .raw = p.raw, .tx = p.tx });
+    }
+    for (rest) |t| try entries.append(a, .{ .txid = t.txid, .format = .raw, .raw = t.raw, .tx = t.tx });
+    return c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = entries.items[entries.items.len - 1].txid, .bumps = bumps.items, .entries = entries.items });
+}
+
+test "two spenders (0.10.0): A taken in (spent by A); a proven B — A rejected double-spent by B, the output spent by B; again, nothing posted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    const State = c.state.State;
+    const fund = try funding(a);
+    const h1 = mine(c.header.hash(&c.chain.Network.regtest.genesis()), fund.txid, 1_700_000_600);
+    var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+
+    // Step 1: A comes in unproven over the funding.
+    var st = try State.load(a, ms.store(), null, .regtest);
+    _ = try st.addHeaders(&.{&h1});
+    const ta = try spend(a, &fund.tx);
+    const g = try st.ingest(try beefOver(a, fund, null, 0, &.{ta}));
+    try std.testing.expectEqual(@as(usize, 2), st.added.items.len); // the funding and A: each subscribed
+    try ix.deliver(a, &st, try shape.statusEvents(a, &st, "chain", g.txid));
+    try expectOutput(try ix.state(a, fund.txid, 0), "spent", ta.txid);
+    const s1 = try st.save();
+
+    // Step 2: B, spending the same output, comes in proven at 2.
+    var st2 = try State.load(a, ms.store(), s1, .regtest);
+    const tb = try spendOther(a, &fund.tx);
+    _ = try st2.addHeaders(&.{&mine(c.header.hash(&h1), tb.txid, 1_700_001_200)});
+    const g2 = try st2.ingest(try beefOver(a, fund, tb, 2, &.{}));
+    const facts = try shape.statusEvents(a, &st2, "chain", g2.txid);
+    const fa = try factOf(facts, ta.txid);
+    try expectFact(fa, ta.txid, "rejected", null);
+    try std.testing.expectEqualStrings("double-spent", fa.getText("reason").?);
+    try std.testing.expectEqualStrings(&c.header.toHex(tb.txid), fa.getText("by").?);
+    try expectFact(try factOf(facts, tb.txid), tb.txid, "mined", 2);
+    const before = ix.posts;
+    try ix.deliver(a, &st2, facts);
+    try expectOutput(try ix.state(a, fund.txid, 0), "spent", tb.txid);
+    try std.testing.expectEqual(before + 1, ix.posts); // one post: A's handler; B's finds it said
+    // The same facts again (any order): nothing more to post.
+    const rev = try a.dupe(Value, facts);
+    std.mem.reverse(Value, rev);
+    try ix.deliver(a, &st2, rev);
+    try std.testing.expectEqual(before + 1, ix.posts);
+
+    // The other order from step 1's index: B's handler first, then A's — the same end state.
+    var ix2 = Index{ .latest = std.StringHashMap(Value).init(a) };
+    try ix2.latest.put(try shape.outputName(a, "chain", fund.txid, 0), .{ .map = try a.dupe(c.cbor.Entry, &.{
+        .{ .key = "event", .value = .{ .text = try shape.outputName(a, "chain", fund.txid, 0) } },
+        .{ .key = "state", .value = .{ .text = "spent" } },
+        .{ .key = "spentBy", .value = .{ .text = try a.dupe(u8, &c.header.toHex(ta.txid)) } },
+    }) });
+    try ix2.deliver(a, &st2, rev);
+    try expectOutput(try ix2.state(a, fund.txid, 0), "spent", tb.txid);
+}
+
+test "rolled back (0.10.0): the only spender rejected by the network — the output rolled back (by it), once; a later proof of it — spent again" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    const State = c.state.State;
+    const fund = try funding(a);
+    const h1 = mine(c.header.hash(&c.chain.Network.regtest.genesis()), fund.txid, 1_700_000_600);
+    var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+    var st = try State.load(a, ms.store(), null, .regtest);
+    _ = try st.addHeaders(&.{&h1});
+    const ta = try spend(a, &fund.tx);
+    const g = try st.ingest(try beefOver(a, fund, null, 0, &.{ta}));
+    try ix.deliver(a, &st, try shape.statusEvents(a, &st, "chain", g.txid));
+    const s1 = try st.save();
+
+    var st2 = try State.load(a, ms.store(), s1, .regtest);
+    _ = try st2.applyStatus(ta.txid, "REJECTED", null);
+    const facts = try shape.statusEvents(a, &st2, "chain", null);
+    try ix.deliver(a, &st2, facts);
+    try expectOutput(try ix.state(a, fund.txid, 0), "rolledBack", ta.txid);
+    const n = ix.posts;
+    try ix.deliver(a, &st2, facts);
+    try std.testing.expectEqual(n, ix.posts);
+    const s2 = try st2.save();
+
+    // Mined after all (a proof is the latest fact): spent by it again.
+    var st3 = try State.load(a, ms.store(), s2, .regtest);
+    _ = try st3.addHeaders(&.{&mine(c.header.hash(&h1), ta.txid, 1_700_001_200)});
+    _ = try st3.applyStatus(ta.txid, "MINED", try soloPath(a, 2, ta.txid));
+    try ix.deliver(a, &st3, try shape.statusEvents(a, &st3, "chain", null));
+    try expectOutput(try ix.state(a, fund.txid, 0), "spent", ta.txid);
+}
+
+test "outputs (0.10.0): a coinbase input posts nothing; an output with no message and no live spender posts nothing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    var st = try c.state.State.load(a, ms.store(), null, .regtest);
+    // A coinbase: one input, txid zero, vout 0xffffffff (putTx does not verify).
+    var raw: std.ArrayList(u8) = .empty;
+    try raw.appendSlice(a, &.{ 1, 0, 0, 0, 1 });
+    try raw.appendSlice(a, &([_]u8{0} ** 32));
+    try raw.appendSlice(a, &.{ 0xff, 0xff, 0xff, 0xff, 1, 0x51, 0xff, 0xff, 0xff, 0xff, 1 });
+    try raw.appendSlice(a, &.{ 0x10, 0x27, 0, 0, 0, 0, 0, 0, 1, 0x51, 0, 0, 0, 0 });
+    const cb = c.beef.txidOf(raw.items);
+    _ = try st.putTx(cb, raw.items);
+    var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+    try std.testing.expectEqual(@as(usize, 0), (try shape.outputEvents(a, &st, "chain", cb, ix.reader())).len);
+    // Not held: nothing.
+    try std.testing.expectEqual(@as(usize, 0), (try shape.outputEvents(a, &st, "chain", .{7} ** 32, ix.reader())).len);
+}
+
+test "ingest answer (0.10.0): {txid, status, height?, reason?, by?} in the four words" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    const fund = try funding(a);
+    var st = try c.state.State.load(a, ms.store(), null, .regtest);
+    _ = try st.addHeaders(&.{&mine(c.header.hash(&c.chain.Network.regtest.genesis()), fund.txid, 1_700_000_600)});
+    const ta = try spend(a, &fund.tx);
+    const g = try st.ingest(try beefOver(a, fund, null, 0, &.{ta}));
+    const ans = try shape.ingestAnswer(a, &st, "chain", g.txid);
+    try std.testing.expectEqualStrings(&c.header.toHex(ta.txid), ans.getText("txid").?);
+    try std.testing.expectEqualStrings("pending", ans.getText("status").?);
+    try std.testing.expect(ans.get("event") == null);
+    const af = try shape.ingestAnswer(a, &st, "chain", fund.txid);
+    try std.testing.expectEqualStrings("mined", af.getText("status").?);
+    try std.testing.expectEqual(@as(?u64, 1), af.getUint("height"));
 }

@@ -24,7 +24,8 @@
 //!                                        `message`); it has no deadline of its own
 //!
 //! Called (`kind: "call"`, an in-VM or kernel call): `status` and `proof`, the
-//! same answers as dag-cbor on stdout; they write nothing.
+//! same answers as dag-cbor on stdout; they write nothing. `ingest` (0.10.0): an in-VM call from a
+//! step only (it writes in that step); a kernel call of it is refused.
 //!
 //! The header chain is the host's (shruggr/skein#156): kept once per host by
 //! its kernel process, in the `host/chain` set every instance reads. A `chain`
@@ -32,17 +33,25 @@
 //! record's (skein-sdk `State.pointAt`): no copy; a reorg the host chain took
 //! reverts the proofs above the fork, as a heavier branch always did.
 //!
-//! Every status of a transaction a step comes to (0.8.0, David 2026-11-09) is recorded (the state) and
-//! emitted as the fact `<app>/tx/<txid>` (skein 0.5.0's event index; listeners rest on the name,
-//! skein 0.5.4): `{status: "accepted"}` (the first status that is not a rejection), `{status:
-//! "mined", height}` (its proof, on our best chain; again in another block after a reorg),
-//! `{status: "rejected"}` (the settlement record says why; 0.9.0: a later proof is `mined` all the
-//! same — the latest fact, skein-sdk 0.18.0), `{status: "reorged"}` (a reorg turned
-//! it back to unproven). An ingest emits the subject's status as it stands (mined, rejected,
-//! accepted; nothing while it is only broadcast). The watchers list is gone.
+//! Every status of a transaction a step comes to is recorded (the state) and emitted as the fact
+//! `<app>/tx/<txid>` (skein 0.5.0's event index; listeners rest on the name, skein 0.5.4), in four
+//! words (0.10.0, David 2026-11-09): `pending` (at intake: held, broadcast asked for, no answer yet),
+//! `seen` (the network has it; after a reorg with `reason: "reorged"`), `mined` (`height`),
+//! `rejected` (`reason`; `by` the winner of a double spend or the root of an input-rejected
+//! cascade). EVERY transaction gets one at intake (skein-sdk 0.19.0 `added`), and an ingest
+//! emits its subject's status as it stands. None is final: a later proof is `mined`.
+//!
+//! Output states (0.10.0): when the app first holds a transaction T it subscribes its fn
+//! `outputs` to `<app>/tx/<T>`; each status fact of T steps it — the outputs T spends walked
+//! from the chain state, each posted as `<app>/output/<txid>.<vout>` {state: spent |
+//! rolledBack, spentBy} when it differs from the latest one (shape.outputEvents).
+//!
+//! `ingest` is also an in-VM call (0.10.0): from a program's step, the app writes, subscribes,
+//! emits the statuses and the broadcast in that step (`ingestCall`).
 //!
 //! Every step keeps a result record and prints its CID:
 //!   {kind: "chain-result", op, chain?: {root, height, fork}, fn?, txid?, status?, error?, facts?: [{event, status}], answered, broadcast, awaited?, state}
+//!   {kind: "chain-result", op: "outputs", txid, posted}   (a status fact's subscription step; the output facts not listed)
 const std = @import("std");
 const c = @import("chain");
 const vm = @import("vm.zig");
@@ -113,6 +122,9 @@ fn run(a: Allocator) anyerror!void {
     const args = in.get("args") orelse return error.BadInput;
     var op: []const u8 = "event";
 
+    // 0.10.0: a status fact of a transaction we hold steps the subscription made when it was taken in.
+    if (eql(u8, args.getText("fn") orelse "", OUTPUTS_FN) and args.getCid("event") != null) return onOutputs(a, &p, args);
+
     const woke = in.getBool("woke") orelse false;
     if (in.get("event") != null or in.get("message") != null or woke) {
         // A thread resting after a broadcast: what it awaits, from the result its last step kept.
@@ -147,6 +159,9 @@ fn run(a: Allocator) anyerror!void {
     // `<app>/tx/<txid>` {status, height?}; no watchers. A reorg this step turned proven transactions
     // back to unproven is broadcast nowhere (0.7.1): the fact `reorged`; the new proof arrives as the
     // first did, through the host's status feed, and is the fact `mined` again.
+    // 0.10.0: each transaction newly held is tied to its outputs' states: its status fact steps
+    // `outputs` (subscribed here; a subscription made in this step hears this step's facts too).
+    try subscribeAdded(a, &p.st, conf.app);
     const facts = try shape.statusEvents(a, &p.st, conf.app, p.ingested);
     for (facts) |e| _ = try vm.emitEvent(a, e);
     if (facts.len > 0) {
@@ -195,6 +210,36 @@ fn run(a: Allocator) anyerror!void {
         .{ .key = "state", .value = if (new_state) |ns| .{ .cid = ns } else .null },
     });
     _ = try vm.finish(a, .{ .map = out.items });
+}
+
+/// The function the app subscribes, per transaction taken in, to its status fact `<app>/tx/<txid>`.
+const OUTPUTS_FN = "outputs";
+
+/// 0.10.0: every transaction this step newly held — its status fact steps `outputs`.
+fn subscribeAdded(a: Allocator, st: *State, app: []const u8) !void {
+    for (st.added.items) |t| try vm.on(try shape.txName(a, app, t), OUTPUTS_FN);
+}
+
+/// 0.10.0 (David 2026-11-09): a status fact of a transaction `t` — its subscription's step. Each output
+/// `t` spends is walked from the chain state and its state posted as `<app>/output/<txid>.<vout>`
+/// when it differs from the latest one (shape.outputEvents). Writes no state.
+fn onOutputs(a: Allocator, p: *Step, args: Value) !void {
+    const name = args.getText("box") orelse return error.BadInput;
+    const t = c.header.fromHex(name[(std.mem.lastIndexOfScalar(u8, name, '/') orelse return error.BadInput) + 1 ..]) catch return error.BadInput;
+    var dummy: u8 = 0;
+    const latest = shape.Latest{ .ptr = &dummy, .f = struct {
+        fn f(_: *anyopaque, al: Allocator, n: []const u8) anyerror!?Value {
+            return vm.latestEvent(al, n);
+        }
+    }.f };
+    const events = try shape.outputEvents(a, &p.st, p.conf.app, t, latest);
+    for (events) |e| _ = try vm.emitEvent(a, e);
+    _ = try vm.finish(a, .{ .map = try a.dupe(cbor.Entry, &.{
+        .{ .key = "kind", .value = .{ .text = "chain-result" } },
+        .{ .key = "op", .value = .{ .text = OUTPUTS_FN } },
+        .{ .key = "txid", .value = try p.hex(t) },
+        .{ .key = "posted", .value = .{ .uint = events.len } },
+    }) });
 }
 
 /// A `chain` or `proof` event (the host's headers tracker and broadcaster).
@@ -323,7 +368,7 @@ fn callOf(p: *Step, name: []const u8, fargs: Value) !Outcome {
 fn onCall(a: Allocator, in: Value) !void {
     const name = in.getText("fn") orelse "";
     const f = shape.Fn.parse(name) orelse return error.UnknownFn;
-    if (f.writes()) return error.IngestIsAMessage; // it writes: a message, answered at the caller's address
+    if (f == .ingest) return ingestCall(a, in);
     const arg = try cbor.decode(a, in.getBytes("arg") orelse return error.BadInput);
     const txid = (try shape.txidArg(arg)) orelse return error.BadArgs;
     // The state head of the app named "chain" (a call names no program; the name is the app's identity).
@@ -334,6 +379,47 @@ fn onCall(a: Allocator, in: Value) !void {
     var st = try State.load(a, s, state, network);
     if (f == .status) return vm.answer(a, try shape.txState(a, &st, txid, null, ""));
     return vm.answer(a, (try shape.proofOf(a, &st, txid)) orelse .null);
+}
+
+/// `ingest {beef}` as an in-VM call (0.10.0, David 2026-11-09): from a program's step, the chain app
+/// takes the BEEF in as part of that step — every transaction recorded and its state advanced (in
+/// the chain app's own scope), each newly held one subscribed (`outputs`) and given its status
+/// fact, each left unproven broadcast (the event the host carries). Nothing is awaited: the host's
+/// proofs and statuses reach the chain app as they do any transaction it holds (box `chain`,
+/// `chain/status`). Answers the subject's status in the four words (shape.ingestAnswer). A kernel
+/// call (no step) is refused: it writes.
+fn ingestCall(a: Allocator, in: Value) !void {
+    const step = in.get("step") orelse return vm.refuse("ingest writes: call it from a step");
+    const s = vm.store();
+    // The app named "chain" (a call names no program; the name is the app's identity), its record's config.
+    var record: ?Value = null;
+    if (try vm.head(a, "chain/app")) |root| {
+        const r = try s.getValue(a, root);
+        if (eql(u8, r.getText("kind") orelse "", "app")) record = r;
+    }
+    const conf = try shape.configOf("chain", record, in.get("defaults"));
+    const head_name = try conf.stateHead(a);
+    const state = try vm.head(a, head_name);
+    var st = try State.load(a, s, state, conf.network);
+    st.now = @intCast(step.getUint("at") orelse in.getUint("now") orelse return error.BadInput);
+    const arg = try cbor.decode(a, in.getBytes("arg") orelse return error.BadInput);
+    if (arg != .map) return vm.refuse("args: want a map");
+    const beef = if (arg.get("beef")) |env| if (env == .map)
+        c.record.wireOf(a, s, env) catch |e| return vm.refuse(try std.fmt.allocPrint(a, "args.beef: not a BEEF envelope over a pointer record held here ({s})", .{@errorName(e)}))
+    else
+        (try shape.beefArg(a, arg)) orelse return vm.refuse("args.beef: want a BEEF envelope, or a BEEF (bytes, or hex)")
+    else
+        return vm.refuse("args.beef: want a BEEF envelope, or a BEEF (bytes, or hex)");
+    const got = st.ingest(beef) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        else => return vm.refuse(try std.fmt.allocPrint(a, "ingest: {s}", .{@errorName(e)})),
+    };
+    try subscribeAdded(a, &st, conf.app);
+    for (try shape.statusEvents(a, &st, conf.app, got.txid)) |e| _ = try vm.emitEvent(a, e);
+    const new_state = try st.save();
+    if (state == null or !eql(u8, state.?, new_state)) try vm.advance(head_name, new_state);
+    for (got.registered) |t| try vm.broadcast(a, t, (try st.beefOf(t)).?);
+    return vm.answer(a, try shape.ingestAnswer(a, &st, conf.app, got.txid));
 }
 
 /// The transactions the thread awaits: the result its last step kept (`awaited`).

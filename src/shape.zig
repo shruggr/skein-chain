@@ -160,16 +160,30 @@ pub fn answerBody(a: Allocator, func: []const u8, request: []const u8, outcome: 
     return .{ .map = es.items };
 }
 
-/// A transaction's status as a fact (0.8.0, David 2026-11-09): the emit `{event: "<app>/tx/<txid hex>",
-/// status, height?}` — `status` "accepted", "mined" (with `height`, its block's on our best chain),
-/// "rejected" or "reorged".
-pub fn statusEvent(a: Allocator, app: []const u8, txid: [32]u8, status: []const u8, height: ?u64) !Value {
+/// The fact name of a transaction's status: `<app>/tx/<txid hex>`.
+pub fn txName(a: Allocator, app: []const u8, txid: [32]u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}/tx/{s}", .{ app, &c.header.toHex(txid) });
+}
+
+/// The fact name of an output's state (0.10.0): `<app>/output/<txid hex>.<vout>`.
+pub fn outputName(a: Allocator, app: []const u8, txid: [32]u8, vout: u32) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}/output/{s}.{d}", .{ app, &c.header.toHex(txid), vout });
+}
+
+/// A transaction's status as a fact (0.10.0, David 2026-11-09): the emit `{event: "<app>/tx/<txid
+/// hex>", status, height?, reason?, by?}` — `status` one of four: "pending" (held, its broadcast
+/// asked for, no answer yet), "seen" (the network has it; after a reorg with `reason` "reorged"),
+/// "mined" (with `height`, its block's on our best chain), "rejected" (with `reason`; `by` the
+/// winner of a double spend, or the cascade's root for "input-rejected"). None is final.
+pub fn statusEvent(a: Allocator, app: []const u8, txid: [32]u8, status: []const u8, height: ?u64, reason: ?[]const u8, by: ?[32]u8) !Value {
     var es: std.ArrayList(cbor.Entry) = .empty;
     try es.appendSlice(a, &.{
-        .{ .key = "event", .value = .{ .text = try std.fmt.allocPrint(a, "{s}/tx/{s}", .{ app, &c.header.toHex(txid) }) } },
+        .{ .key = "event", .value = .{ .text = try txName(a, app, txid) } },
         .{ .key = "status", .value = .{ .text = status } },
     });
     if (height) |h| try es.append(a, .{ .key = "height", .value = .{ .uint = h } });
+    if (reason) |r| try es.append(a, .{ .key = "reason", .value = .{ .text = r } });
+    if (by) |b| try es.append(a, .{ .key = "by", .value = try txidText(a, b) });
     return .{ .map = es.items };
 }
 
@@ -181,33 +195,125 @@ fn minedHeight(st: *State, txid: [32]u8) !?u64 {
     return h;
 }
 
-/// Every status this step came to, as facts, in order: each transaction a reorg turned back to
-/// unproven (`st.reverted`: "reorged"), then each state change of a transaction with a registered
-/// broadcast (`st.changes`: "accepted", "mined" with its height, "rejected"), then — an ingest — its
-/// subject's status as it stands ("mined", "rejected", or "accepted" once a status accepted it; none
-/// while it is only broadcast). A transaction's same status twice in one step is one fact.
+/// A held transaction's status as it stands, in the four words: proven "mined"; rejected
+/// "rejected" (its settlement's reason and cause); unproven "seen" once a status accepted it, else
+/// "pending".
+pub fn statusNow(a: Allocator, st: *State, app: []const u8, txid: [32]u8) !Value {
+    return switch (try st.status(txid)) {
+        .proven => statusEvent(a, app, txid, "mined", try minedHeight(st, txid), null, null),
+        .rejected => blk: {
+            const r = (try st.rejectionOf(txid)) orelse break :blk statusEvent(a, app, txid, "rejected", null, "rejected", null);
+            break :blk statusEvent(a, app, txid, "rejected", null, r.reason, r.by);
+        },
+        .unproven => blk: {
+            const seen = if (try st.broadcastRecord(txid)) |r| r.getBool("accepted") orelse false else false;
+            break :blk statusEvent(a, app, txid, if (seen) "seen" else "pending", null, null, null);
+        },
+    };
+}
+
+/// Every status this step came to, as facts, in order (0.10.0):
+///   - each transaction a reorg turned back to unproven (`st.reverted`): "seen", reason "reorged";
+///   - each state change of a transaction with a registered broadcast (`st.changes`): "seen" (was
+///     "accepted"), "mined" with its height, "rejected" with its reason and cause;
+///   - each transaction this step newly held (`st.added`, skein-sdk 0.19.0): its status at intake
+///     ("pending", "mined", "rejected", "seen") — every transaction gets one;
+///   - an ingest's subject: its status as it stands, also when it was held before.
+/// A transaction's same status twice in one step is one fact.
 pub fn statusEvents(a: Allocator, st: *State, app: []const u8, ingested: ?[32]u8) ![]Value {
     const Said = struct { txid: [32]u8, status: []const u8 };
     var said: std.ArrayList(Said) = .empty;
     var out: std.ArrayList(Value) = .empty;
     const add = struct {
-        fn f(al: Allocator, s: *State, ap: []const u8, ss: *std.ArrayList(Said), o: *std.ArrayList(Value), txid: [32]u8, status: []const u8) !void {
+        fn f(al: Allocator, ss: *std.ArrayList(Said), o: *std.ArrayList(Value), txid: [32]u8, ev: Value) !void {
+            const status = ev.getText("status").?;
             for (ss.items) |x| if (eql(u8, &x.txid, &txid) and eql(u8, x.status, status)) return;
             try ss.append(al, .{ .txid = txid, .status = status });
-            const h = if (eql(u8, status, "mined")) try minedHeight(s, txid) else null;
-            try o.append(al, try statusEvent(al, ap, txid, status, h));
+            try o.append(al, ev);
         }
     }.f;
-    for (st.reverted.items) |t| try add(a, st, app, &said, &out, t, "reorged");
-    for (st.changes.items) |ch| try add(a, st, app, &said, &out, ch.txid, switch (ch.state) {
-        .accepted => "accepted",
-        .proven => "mined",
-        .rejected => "rejected",
+    for (st.reverted.items) |t| try add(a, &said, &out, t, try statusEvent(a, app, t, "seen", null, "reorged", null));
+    for (st.changes.items) |ch| try add(a, &said, &out, ch.txid, switch (ch.state) {
+        .accepted => try statusEvent(a, app, ch.txid, "seen", null, null, null),
+        .proven => try statusEvent(a, app, ch.txid, "mined", try minedHeight(st, ch.txid), null, null),
+        .rejected => try statusEvent(a, app, ch.txid, "rejected", null, ch.detail, ch.by),
     });
-    if (ingested) |t| switch (try st.status(t)) {
-        .proven => try add(a, st, app, &said, &out, t, "mined"),
-        .rejected => try add(a, st, app, &said, &out, t, "rejected"),
-        .unproven => if (try st.broadcastRecord(t)) |r| if (r.getBool("accepted") orelse false) try add(a, st, app, &said, &out, t, "accepted"),
+    for (st.added.items) |t| try add(a, &said, &out, t, try statusNow(a, st, app, t));
+    if (ingested) |t| if (try st.holds(t)) try add(a, &said, &out, t, try statusNow(a, st, app, t));
+    return out.items;
+}
+
+/// What a transaction's answer to an in-VM `ingest` call is (0.10.0): its status in the four
+/// words, as the fact says it — `{txid, status, height?, reason?, by?}`.
+pub fn ingestAnswer(a: Allocator, st: *State, app: []const u8, txid: [32]u8) !Value {
+    const ev = try statusNow(a, st, app, txid);
+    var es: std.ArrayList(cbor.Entry) = .empty;
+    try es.append(a, .{ .key = "txid", .value = try txidText(a, txid) });
+    for (ev.map) |e| if (!eql(u8, e.key, "event")) try es.append(a, e);
+    return .{ .map = es.items };
+}
+
+/// The latest record under a fact's name (the event index's `latest`), or null: in the VM the
+/// `events` import; in tests a stand-in.
+pub const Latest = struct {
+    ptr: *anyopaque,
+    f: *const fn (ptr: *anyopaque, a: Allocator, name: []const u8) anyerror!?Value,
+    pub fn of(self: Latest, a: Allocator, name: []const u8) !?Value {
+        return self.f(self.ptr, a, name);
+    }
+};
+
+/// The spender an output's state names now, from the chain state (0.10.0): of the held
+/// transactions spending it that are not rejected, the mined one, else the first (lowest txid);
+/// null when none.
+pub fn liveSpender(st: *State, txid: [32]u8, vout: u32) !?[32]u8 {
+    var first: ?[32]u8 = null;
+    for (try st.spendersOf(c.store.outpointKey(txid, vout))) |sp| switch (try st.status(sp)) {
+        .rejected => {},
+        .proven => return sp,
+        .unproven => if (first == null) {
+            first = sp;
+        },
     };
+    return first;
+}
+
+/// The output-state facts a status change of `t` calls for (0.10.0, David 2026-11-09): each output
+/// `t` spends (coinbase inputs skipped) walked from the chain state — "spent" by its live spender
+/// (`liveSpender`), else "rolledBack" (`spentBy` the spender the latest message named) — posted
+/// only when it differs from the latest message under `<app>/output/<txid>.<vout>`; an output with
+/// no message yet and no live spender gets none. `{event, state, spentBy}`.
+pub fn outputEvents(a: Allocator, st: *State, app: []const u8, t: [32]u8, latest: Latest) ![]Value {
+    var out: std.ArrayList(Value) = .empty;
+    const raw = (try st.txRaw(t)) orelse return out.items;
+    const tx = try c.bsvz.transaction.Transaction.parse(a, raw);
+    var names: std.ArrayList([]const u8) = .empty;
+    each: for (tx.inputs) |in| {
+        const prev = in.previous_outpoint;
+        if (prev.index == 0xffffffff and std.mem.allEqual(u8, &prev.txid.bytes, 0)) continue;
+        const name = try outputName(a, app, prev.txid.bytes, prev.index);
+        for (names.items) |n| if (eql(u8, n, name)) continue :each;
+        try names.append(a, name);
+        const last = try latest.of(a, name);
+        const last_state = if (last) |l| l.getText("state") else null;
+        const last_by = if (last) |l| l.getText("spentBy") else null;
+        var state: []const u8 = undefined;
+        var by: [32]u8 = undefined;
+        if (try liveSpender(st, prev.txid.bytes, prev.index)) |s| {
+            state = "spent";
+            by = s;
+            if (last_state != null and eql(u8, last_state.?, "spent") and last_by != null and eql(u8, last_by.?, &c.header.toHex(s))) continue;
+        } else {
+            const lb = last_by orelse continue;
+            if (last_state != null and eql(u8, last_state.?, "rolledBack")) continue;
+            state = "rolledBack";
+            by = c.header.fromHex(lb) catch continue;
+        }
+        try out.append(a, .{ .map = try a.dupe(cbor.Entry, &.{
+            .{ .key = "event", .value = .{ .text = name } },
+            .{ .key = "state", .value = .{ .text = state } },
+            .{ .key = "spentBy", .value = try txidText(a, by) },
+        }) });
+    }
     return out.items;
 }

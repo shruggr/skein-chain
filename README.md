@@ -14,7 +14,7 @@ manifest). Its interface is `chain/1` on box `chain`:
 
 | fn | args | writes | answered |
 |---|---|---|---|
-| `ingest` | `{beef}` | yes | proven in: at once. Unproven in: recorded, broadcast, then once per state change: `accepted`, then `proven` or `rejected` |
+| `ingest` | `{beef}` | yes | a message (proven in: answered at once; unproven in: recorded, broadcast) or, 0.10.0, an in-VM call from a program's step (answered `{txid, status, height?, reason?, by?}`: the step's own write) |
 | `status` | `{txid}` | no | at once: `{txid, state, tx?, block?, height?, txStatus?, broadcast?, reason?, settlement?}` (CIDs) |
 | `proof` | `{txid}` | no | at once: `{txid, tx, block, height, depth, position}` |
 
@@ -110,7 +110,7 @@ at a pinned commit.
 |---|---|
 | `bin/chain.wasm` | the program (wasm32-wasi) |
 | `etc/app.json` | the manifest |
-| `src/main.zig` | the steps: messages, events, statuses, the awaiting thread; the reads as a call |
+| `src/main.zig` | the steps: messages, events, statuses, the awaiting thread, the `outputs` subscription; the reads and `ingest` as a call |
 | `src/shape.zig` | configuration, functions, answer shapes (pure) |
 | `src/vm.zig` | the `skein` imports over the SDK chain library's values |
 
@@ -126,10 +126,11 @@ at a pinned commit.
 
 | | |
 |---|---|
-| this app | 0.9.0 (tag `v0.9.0`) |
-| skein-sdk | v0.17.2, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
+| this app | 0.10.0 (tag `v0.10.0`) |
+| skein-sdk | v0.19.0, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
 | skein | 0.5.4 or later (the event index, 0.5.0: the facts; a thread resting on a name, 0.5.4: the listeners); skein's equivs pin this repo by commit |
 
+0.10.0 (David 2026-11-09; skein-sdk v0.19.0): four statuses — `pending` (at intake: held, broadcast asked for, no answer yet), `seen` (was `accepted`; after a reorg `seen` with `reason: "reorged"`, no `reorged` word), `mined` (`height`), `rejected` (`reason`; `by` the winner of a double spend, or the root of an `input-rejected` cascade) — and every transaction gets one at intake (`mined` when it comes proven, BEEF ancestors included). Output states: `chain/output/<txid>.<vout>` `{state: spent | rolledBack, spentBy}`, the latest message the output's current state; wired by subscription — the app subscribes its fn `outputs` to `chain/tx/<T>` when it first holds T, and every status fact of T walks the outputs T spends from the chain state (the live spender: held, not rejected, a mined one first) and posts what differs from the latest message (an output with no message and no live spender gets none; coinbase inputs skipped; no backfill). `ingest` as an in-VM call (the app writes its state, subscribes, emits the statuses and the broadcast in the caller's step; nothing awaited); a kernel call of it is refused. The message form stays for the senders that still use it. Contract: agent-env plans/research/chain-contract-2026-11-09.md.
 0.9.0: a status is a transaction's latest fact (David 2026-11-09): a valid proof makes it `mined` also after a rejection — the proof event or a BEEF carrying it proves it, the fact `mined` with its height is emitted (no broadcast record left to settle: no watchers), its inputs' spends are counted again; the settlement record stays, read for its reason (skein-sdk v0.18.0). 0.8.0: every status of a transaction is a fact (David 2026-11-09): recorded, and emitted as `<app>/tx/<txid>` `{status: accepted | mined (height) | rejected | reorged}` (skein 0.5.0's event index; a listener rests on the name, skein 0.5.4); an ingest emits its subject's status as it stands; the watchers list goes (`ingest` no longer registers its caller: it is answered once, at the ingest, when there is a status or an error); the proof event's `via` is kept on the result record only; skein-sdk v0.17.2. 0.7.1: a reorg broadcasts nothing (the settled overlay sync design, David 2026-10-30): the transactions it turns back to unproven are not broadcast again nor awaited by the step; the new proof arrives as the first did, through the host's status feed (a new block hash is a new status, routed as a proof event), and is answered to every watcher. 0.7.0: the header chain is the host's (shruggr/skein#156): the event `chain {root, height}` points the state's `headers` and `heights` at the host chain record (skein-sdk v0.12.0 `State.pointAt`; a reorg the host took reverts the proofs above the fork); a `header` event is refused; the first step no longer loads the image's chain (the host bootstraps its own chain from it), and the result record has `chain: {root, height, fork}`, no `image`. 0.6.1: `ingest` sorts a BEEF that came out of order (a child before its parent: ts-sdk's writer puts a proven child before its proven parent) parents-first and verifies it, instead of refusing `NotParentsFirst` (skein-sdk v0.11.1; David Case, 2026-10-22); SPV is as strict as before. 0.6.0: `ingest {beef}` takes the envelope the kernel's door writes beside the pointer record (`{form, beef, subject?, vout?}`, shruggr/skein#146), read back with skein-sdk v0.11.0 `chain.record.wireOf`; a Subject BEEF (BRC-233) ingests like the other forms. 0.5.0: routes, no senders (shruggr/skein#143; skein-sdk v0.9.0). 0.4.0: the first step on an instance whose tree carries a header chain (`chain/headers`, the image's: shruggr/skein#132) loads it into the empty state — the whole chain from genesis, verified (skein-sdk v0.8.0 `chain.image`); the result record's `image: {headers, tip}`. 0.3.2: a proof after a reorg is answered to the same watchers as the first, with its `block` (#2; skein-sdk v0.7.1 keeps a proven transaction's watchers; the app uses only the SDK's `chain` module, so 0.7.0's `sk` changes — intentions, `authfetch`, no `provider(role)` — touch nothing here). 0.3.1: the status provider's box is `chain/status` (the manifest still writes `"status"`; skein resolves a box under the app's name, shruggr/skein#128). 0.3.0: `ingest {beef: <cid>}` takes the BEEF as its pointer record, and the `$self`/`$owner` rows name `filter: "beef"` (shruggr/skein#121); no abandonment: the app never rejects on its own clock (#1). 0.2.0 split the open `chain` box into the `event`, `$self` and `$owner` rows
 (shruggr/skein#79); 0.1.0 was the first release (shruggr/skein#78).
 

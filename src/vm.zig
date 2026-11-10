@@ -1,8 +1,9 @@
 //! The skein calls as the chain program sees them (the preview1 `skein`
 //! imports, skein docs/VM.md), over the chain library's dag-cbor values: the
 //! input, the store as the library's `Store`, heads, the address book,
-//! `emit` (a message, or the broadcast event), `await`, `deadline`, and
-//! keep-and-print of a result record. wasm32-wasi only.
+//! `emit` (a message, or the broadcast event), `await`, `deadline`, `on`
+//! and `events` (skein 0.5.2 / 0.5.0), and keep-and-print of a result
+//! record. wasm32-wasi only.
 const std = @import("std");
 const c = @import("chain");
 
@@ -23,6 +24,8 @@ pub const sk = struct {
     pub extern "skein" fn emit(msg: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
     pub extern "skein" fn deadline(until: i64) i32;
     pub extern "skein" fn @"await"(cid: [*]const u8, cid_len: u32) i32;
+    pub extern "skein" fn on(name: [*]const u8, name_len: u32, func: [*]const u8, func_len: u32) i32;
+    pub extern "skein" fn events(q: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
 };
 
 var last_error: [1024]u8 = undefined;
@@ -136,6 +139,33 @@ pub fn broadcast(a: std.mem.Allocator, txid: [32]u8, beef: []const u8) !void {
 pub fn emitEvent(a: std.mem.Allocator, ev: Value) ![]const u8 {
     const bytes = try cbor.encode(a, ev);
     return result(a, sk.emit, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) });
+}
+
+/// Subscribe this app's `func` (a function of its program) to the facts named `name` (skein 0.5.2):
+/// kept when the step ends without error; each fact under the name steps it, also one this same
+/// step emits.
+pub fn on(name: []const u8, func: []const u8) !void {
+    if (sk.on(name.ptr, @intCast(name.len), func.ptr, @intCast(func.len)) < 0) return failed();
+}
+
+/// The latest fact under `name` exactly (skein 0.5.0's event index, `latest`): its record, or null.
+/// The index as it stands before this step's update (a step does not see its own emits).
+pub fn latestEvent(a: std.mem.Allocator, name: []const u8) !?Value {
+    const q = try cbor.encode(a, .{ .map = try a.dupe(cbor.Entry, &.{
+        .{ .key = "name", .value = .{ .text = name } },
+        .{ .key = "latest", .value = .{ .boolean = true } },
+    }) });
+    const rows = try cbor.decode(a, try result(a, sk.events, .{ q.ptr, @as(u32, @intCast(q.len)) }));
+    if (rows != .array or rows.array.len == 0) return null;
+    return rows.array[rows.array.len - 1].get("record");
+}
+
+/// A refusal with its own message: the step (or call) ends with it on stderr.
+pub fn refuse(msg: []const u8) error{Refused} {
+    const n = @min(msg.len, last_error.len);
+    @memcpy(last_error[0..n], msg[0..n]);
+    last_error_len = n;
+    return error.Refused;
 }
 
 /// Rest the thread until an event or a message about this record (a transaction's CID) arrives.

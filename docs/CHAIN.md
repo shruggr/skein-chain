@@ -1,4 +1,4 @@
-# The chain app (0.9.0)
+# The chain app (0.10.0)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an
@@ -61,11 +61,11 @@ Status is computed from the records: **rejected** (a settlement record),
 rejection walks the held transactions that spend it (the `spends` edges)
 and rejects them too (`input-rejected`, `cause` the first); a proof rejects
 every other held transaction spending one of the same outputs
-(`double-spent`). Nothing else rejects: a transaction the chain app cannot
+(`double-spent`, 0.10.0: `cause` the proven winner). Nothing else rejects: a transaction the chain app cannot
 prove stays known and unproven for as long as it is held, and the threads
 resting on its fact keep resting. A proven transaction is never rejected.
 A reorg that replaces the block a proof names turns the transaction back to
-unproven — the fact `reorged` — and its broadcast is registered again,
+unproven — the fact `seen` with `reason: "reorged"` (0.10.0; was `reorged`) — and its broadcast is registered again,
 and nothing is sent anywhere (0.7.1, David 2026-10-30: "I see no value in
 rebroadcast, as the state should all be tied together and should heal when
 updated proofs propagate" — before 0.7.1 it was broadcast again). The new
@@ -168,24 +168,58 @@ again on those still unproven.
 
 **A status is the latest fact** (0.9.0, David 2026-11-09): a valid proof for a transaction makes it proven and emits `mined`, also when it was rejected before (skein-sdk 0.18.0: the `rejected` map no longer overrides a proof; the settlement record stays, read for its reason).
 
-**Every status is a fact** (0.8.0, David 2026-11-09). Each status of a
+**Four statuses, one at intake** (0.10.0, David 2026-11-09; supersedes 0.8.0's words). Each status of a
 transaction a step comes to is recorded (the state above) and emitted as the
 fact `<app>/tx/<txid hex>` (skein 0.5.0's event index, under the app's own
 name — `chain/tx/<txid>`; a listener's thread rests on the name, skein
-0.5.4's `on(name)`, and every fact under it wakes it):
+0.5.4's `on(name)`, and every fact under it wakes it). None is final: each is
+the latest thing known, and a later valid proof is `mined`.
 
 | `status` | when | also |
 |---|---|---|
-| `accepted` | the first status from the status provider that is not a rejection (RECEIVED, SEEN_ON_NETWORK, …) | |
-| `mined` | its proof, on the best chain (at once for a transaction that arrives proven); again after a reorg, proven in another block | `height` |
-| `rejected` | a rejecting status (REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED), a competing spend proven, something it spends rejected | (the settlement record says why: `status {txid}`'s `reason`) |
-| `reorged` | a reorg turned it back to unproven | |
+| `pending` | at intake: held, its broadcast asked for, no answer yet | |
+| `seen` | the first status from the status provider that is not a rejection (RECEIVED, SEEN_ON_NETWORK, …: was `accepted`); a reorg turned it back to unproven | after a reorg `reason: "reorged"` |
+| `mined` | its proof, on the best chain (at intake for a transaction that arrives proven, a BEEF's ancestors included); again after a reorg, proven in another block | `height` |
+| `rejected` | a rejecting status (REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED: the reason), a competing spend proven (`double-spent`), something it spends rejected (`input-rejected`) | `reason` (the settlement record's); `by`: the winner of a double spend, or the cascade's root (the settlement's `cause`, skein-sdk 0.19.0) |
 
-An `ingest` emits its subject's status as it stands (`mined`, `rejected`, or
-`accepted` when a status accepted it already; nothing while it is only
-broadcast), so a listener that rests on the name before its ingest is
-answered hears it. The watchers list is gone: a status is never sent to a
-caller as a message.
+**Every transaction gets a status at intake**: each one a step newly holds
+(skein-sdk 0.19.0 `State.added`: an ingest's parents first) — `pending`, or
+`mined` when it comes proven, or `rejected` when a proven held one already
+spends what it spends. An `ingest` also emits its subject's status as it
+stands when it was held before, so a listener that rests on the name before
+its ingest hears it.
+
+**Output states** (0.10.0, David 2026-11-09). Each output a held transaction
+spends has a state, the fact `<app>/output/<txid hex>.<vout>`:
+
+    {state: "spent" | "rolledBack", spentBy: <txid hex>}
+
+The latest message under the name is the output's current state (as a
+transaction's latest `chain/tx` fact is its status). It follows the status of
+the transaction spending it, by subscription: when the app first holds a
+transaction T it subscribes (skein 0.5.2 `on`) its function `outputs` to
+`<app>/tx/<T>` — one subscription per transaction, kept — so every status fact
+of T, the one at intake included (a subscription made in a step hears that
+step's facts), steps `outputs`: each output T spends (coinbase inputs skipped)
+is walked from the chain state — its live spender is a held spender that is
+not rejected, a mined one first, else the first by txid — and its state is
+`spent` by that spender, or `rolledBack` (`spentBy` the spender the latest
+message named) when none is left; posted only when it differs from the latest
+message (an output with no message yet and no live spender gets none). Nothing
+is posted for transactions held before 0.10.0 (no backfill). Who follows an
+output subscribes to its name (the wallet app); the app posts for every output.
+
+**`ingest` as an in-VM call** (0.10.0, David 2026-11-09): from a program's
+step, `call(<the chain app's program>, "ingest", {beef})` (`chain.ingest` the
+same) takes the BEEF in as part of that step — the app's state advanced in its
+own scope, each newly held transaction subscribed and given its status, each
+left unproven broadcast (the event the host carries); nothing is awaited (the
+host's proofs and statuses reach the app as for any transaction it holds:
+box `chain`, `chain/status`). The answer (dag-cbor on stdout): the subject's
+`{txid, status, height?, reason?, by?}` in the words above; a refusal is the
+call's error (`ingest: <ErrorName>`, `args.beef: …`). A kernel call of `ingest`
+is refused (`ingest writes: call it from a step`). The message form below stays
+while senders use it.
 
 The caller of `ingest` (the message's sender) is answered once, at its
 address, in the box it wrote to, as an app answers (docs/APPS.md §4) — when
@@ -217,8 +251,8 @@ the store under the header's merkle root.
 
 The reads are also a kernel call or an in-VM `call` (`kind: "call"`, `fn`
 `status` / `proof`, `arg` dag-cbor `{txid}`, the answer dag-cbor on stdout;
-they write nothing). `ingest` is refused there (`IngestIsAMessage`): it
-writes.
+they write nothing). `ingest` is an in-VM call from a step (0.10.0, above);
+a kernel call of it is refused: it writes.
 
 **The host's events** (sender-less, self-validating; skein docs/MESSAGES.md):
 
