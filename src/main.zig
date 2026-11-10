@@ -125,7 +125,7 @@ fn run(a: Allocator) anyerror!void {
     const s = vm.store();
     const head_name = try conf.stateHead(a);
     const state = try vm.head(a, head_name);
-    var p = Step{ .a = a, .conf = conf, .st = try State.load(a, s, state, conf.network) };
+    var p = Step{ .a = a, .conf = conf, .st = try loadState(a, s, state, conf.network) };
     p.st.now = @intCast(in.getUint("at") orelse return error.BadInput);
     const args = in.get("args") orelse return error.BadInput;
     var op: []const u8 = "event";
@@ -233,6 +233,14 @@ fn run(a: Allocator) anyerror!void {
 /// The function the app subscribes, per transaction taken in, to its status fact `<app>/tx/<txid>`.
 const OUTPUTS_FN = "outputs";
 
+/// The chain state, opened: one written before 0.11.0 (skein-sdk 0.21.0's `shape`) is refused by name.
+fn loadState(a: Allocator, s: c.store.Store, state: ?[]const u8, network: c.chain.Network) !State {
+    return State.load(a, s, state, network) catch |e| switch (e) {
+        error.ChainStateBeforeLinkages => vm.refuse("chain state from before 0.11.0: relaunch on a fresh home"),
+        else => e,
+    };
+}
+
 /// The function the app subscribes, per transaction taken in, to its linkage fact `<app>/proof/<txid>`.
 const PROOF_FN = "proof";
 
@@ -275,9 +283,17 @@ fn raise(a: Allocator, st: *State, app: []const u8, facts: []const Value) !void 
         // A `mined` fact is raised only for a transaction linked on our best chain: its name ends in
         // its txid and it has a block, or the fact is wrong — an error, never skipped.
         const t = try tailHash(e.getText("event").?);
-        const b = (try st.proofBlock(t)) orelse return error.MinedWithoutLinkage;
-        try vm.on(try shape.blockName(a, app, b), BLOCK_FN);
+        if ((try st.proofBlock(t)) == null) return error.MinedWithoutLinkage;
+        try wireBlock(a, st, app, t);
     }
+}
+
+/// A transaction proven on our best chain is tied to the block its linkage names (`block` on
+/// `<app>/block/<hash>`; the kernel keeps one subscription per name).
+fn wireBlock(a: Allocator, st: *State, app: []const u8, t: [32]u8) !void {
+    if (!(try st.holds(t)) or (try st.status(t)) != .proven) return;
+    const b = (try st.proofBlock(t)) orelse return error.MinedWithoutLinkage;
+    try vm.on(try shape.blockName(a, app, b), BLOCK_FN);
 }
 
 fn latestReader() shape.Latest {
@@ -348,6 +364,9 @@ fn onProven(a: Allocator, p: *Step, args: Value, state: ?[]const u8, head_name: 
     const t = try tailHash(args.getText("box") orelse return error.BadInput);
     const facts = try shape.provenFacts(a, &p.st, p.conf.app, t, latestReader());
     try raise(a, &p.st, p.conf.app, facts);
+    // The block subscription follows the linkage, not the fact: re-linked at the same height (no new
+    // `mined` fact), it is still tied to its new block.
+    try wireBlock(a, &p.st, p.conf.app, t);
     try finishStep(a, p, state, head_name, PROOF_FN, t, facts.len);
 }
 
@@ -507,7 +526,7 @@ fn onCall(a: Allocator, in: Value) !void {
     const s = vm.store();
     const state = try vm.head(a, try conf.stateHead(a));
     const network = if (state) |sc| c.chain.Network.parse((try s.getValue(a, sc)).getText("network") orelse "") orelse .main else .main;
-    var st = try State.load(a, s, state, network);
+    var st = try loadState(a, s, state, network);
     if (f == .status) return vm.answer(a, try shape.txState(a, &st, txid, null, ""));
     return vm.answer(a, (try shape.proofOf(a, &st, txid)) orelse .null);
 }
@@ -531,7 +550,7 @@ fn ingestCall(a: Allocator, in: Value) !void {
     const conf = try shape.configOf("chain", record, in.get("defaults"));
     const head_name = try conf.stateHead(a);
     const state = try vm.head(a, head_name);
-    var st = try State.load(a, s, state, conf.network);
+    var st = try loadState(a, s, state, conf.network);
     st.now = @intCast(step.getUint("at") orelse in.getUint("now") orelse return error.BadInput);
     const arg = try cbor.decode(a, in.getBytes("arg") orelse return error.BadInput);
     if (arg != .map) return vm.refuse("args: want a map");
