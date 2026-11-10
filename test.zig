@@ -474,3 +474,151 @@ test "ingest answer (0.10.0): {txid, status, height?, reason?, by?} in the four 
     try std.testing.expectEqualStrings("mined", af.getText("status").?);
     try std.testing.expectEqual(@as(?u64, 1), af.getUint("height"));
 }
+
+// ------------------------------------------------------------ 0.11.0: linkage facts; status by subscription
+
+fn pairBytes(a: std.mem.Allocator, height: u32, left: [32]u8, right: [32]u8) ![]const u8 {
+    var path: std.ArrayList(u8) = .empty;
+    try path.appendSlice(a, &.{ 0xfd, 0, 0, 0x01, 0x02, 0x00, 0x02 });
+    std.mem.writeInt(u16, path.items[1..3], @intCast(height), .little);
+    try path.appendSlice(a, &left);
+    try path.appendSlice(a, &.{ 0x01, 0x00 }); // the right leaf unflagged: a sibling hash
+    try path.appendSlice(a, &right);
+    return path.items;
+}
+
+const Live = struct { fund: Tx, p: Tx, x: Tx, cc: Tx, h1: [80]u8, h2: [80]u8 };
+
+/// The funding at 1; P spends it and X spends P, both mined in block 2 (P at 0, X at 1); C spends X, unmined.
+fn liveWorld(a: std.mem.Allocator, st: *c.state.State) !Live {
+    const fund = try funding(a);
+    const h1 = mine(c.header.hash(&c.chain.Network.regtest.genesis()), fund.txid, 1_700_000_600);
+    const p = try spend(a, &fund.tx);
+    const x = try spend(a, &p.tx);
+    const cc = try spend(a, &x.tx);
+    const h2 = mine(c.header.hash(&h1), c.store.dblSha256(&(p.txid ++ x.txid)), 1_700_001_200);
+    _ = try st.addHeaders(&.{ &h1, &h2 });
+    return .{ .fund = fund, .p = p, .x = x, .cc = cc, .h1 = h1, .h2 = h2 };
+}
+
+fn factFor(facts: []const Value, name_prefix: []const u8, txid: [32]u8) ?Value {
+    for (facts) |f| {
+        const n = f.getText("event").?;
+        if (std.mem.startsWith(u8, n, name_prefix) and std.mem.endsWith(u8, n, &c.header.toHex(txid))) return f;
+    }
+    return null;
+}
+
+test "0.11.0 the live sequence: P's path saved — chain/proof for P and X (X unflagged, unheld); X arrives bare with child C — X's first fact mined at 2, never broadcast; C pending, its bundle has X proven" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    var st = try c.state.State.load(a, ms.store(), null, .regtest);
+    const z = try liveWorld(a, &st);
+    var bumps = [_]c.bsvz.spv.MerklePath{ try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 1, z.fund.txid)), try c.bsvz.spv.MerklePath.parse(a, try pairBytes(a, 2, z.p.txid, z.x.txid)) };
+    var e1 = [_]c.beef.Entry{
+        .{ .txid = z.fund.txid, .format = .raw_with_bump, .bump = 0, .raw = z.fund.raw, .tx = z.fund.tx },
+        .{ .txid = z.p.txid, .format = .raw_with_bump, .bump = 1, .raw = z.p.raw, .tx = z.p.tx },
+    };
+    _ = try st.ingest(try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = z.p.txid, .bumps = &bumps, .entries = &e1 }));
+    const proofs = try shape.proofEvents(a, &st, "chain");
+    try std.testing.expectEqual(@as(usize, 3), proofs.len); // the funding, P, X
+    const px = factFor(proofs, "chain/proof/", z.x.txid).?;
+    try std.testing.expectEqual(@as(?u64, 2), px.getUint("height"));
+    try std.testing.expectEqual(@as(?u64, 1), px.getUint("position"));
+    try std.testing.expectEqualStrings(&c.header.toHex(c.header.hash(&z.h2)), px.getText("block").?);
+    const s1 = try st.save();
+
+    var st2 = try c.state.State.load(a, ms.store(), s1, .regtest);
+    var e2 = [_]c.beef.Entry{
+        .{ .txid = z.p.txid, .format = .txid_only },
+        .{ .txid = z.x.txid, .format = .raw, .raw = z.x.raw, .tx = z.x.tx },
+        .{ .txid = z.cc.txid, .format = .raw, .raw = z.cc.raw, .tx = z.cc.tx },
+    };
+    const g = try st2.ingest(try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = z.cc.txid, .bumps = &.{}, .entries = &e2 }));
+    try std.testing.expectEqual(@as(usize, 0), (try shape.proofEvents(a, &st2, "chain")).len); // nothing new linked
+    const facts = try shape.statusEvents(a, &st2, "chain", g.txid);
+    try expectFact(factFor(facts, "chain/tx/", z.x.txid).?, z.x.txid, "mined", 2);
+    try expectFact(factFor(facts, "chain/tx/", z.cc.txid).?, z.cc.txid, "pending", null);
+    try std.testing.expectEqual(@as(usize, 1), g.registered.len); // C only: X is never broadcast
+    try std.testing.expectEqualSlices(u8, &z.cc.txid, &g.registered[0]);
+    const out = try c.beef.parse(a, (try st2.beefOf(z.cc.txid)).?);
+    for (out.entries) |e| if (std.mem.eql(u8, &e.txid, &z.x.txid)) try std.testing.expectEqual(c.beef.Format.raw_with_bump, e.format);
+}
+
+test "0.11.0 a proof after the transaction: X held pending, P's path arrives — chain/proof/X; X's subscription step raises mined at 2 once" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    var st = try c.state.State.load(a, ms.store(), null, .regtest);
+    const z = try liveWorld(a, &st);
+    var bumps = [_]c.bsvz.spv.MerklePath{try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 1, z.fund.txid))};
+    var e1 = [_]c.beef.Entry{
+        .{ .txid = z.fund.txid, .format = .raw_with_bump, .bump = 0, .raw = z.fund.raw, .tx = z.fund.tx },
+        .{ .txid = z.p.txid, .format = .raw, .raw = z.p.raw, .tx = z.p.tx },
+        .{ .txid = z.x.txid, .format = .raw, .raw = z.x.raw, .tx = z.x.tx },
+    };
+    _ = try st.ingest(try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = z.x.txid, .bumps = &bumps, .entries = &e1 }));
+    var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+    for (try shape.statusEvents(a, &st, "chain", z.x.txid)) |f| try ix.latest.put(f.getText("event").?, f);
+    try std.testing.expectEqualStrings("pending", ix.latest.get(try shape.txName(a, "chain", z.x.txid)).?.getText("status").?);
+    const s1 = try st.save();
+
+    // The broadcaster's proof of P: its path covers X.
+    var st2 = try c.state.State.load(a, ms.store(), s1, .regtest);
+    _ = try st2.applyStatus(z.p.txid, "MINED", try pairBytes(a, 2, z.p.txid, z.x.txid));
+    const proofs = try shape.proofEvents(a, &st2, "chain");
+    try std.testing.expect(factFor(proofs, "chain/proof/", z.x.txid) != null);
+    const step_facts = try shape.statusEvents(a, &st2, "chain", null);
+    try expectFact(factFor(step_facts, "chain/tx/", z.p.txid).?, z.p.txid, "mined", 2);
+    try std.testing.expect(factFor(step_facts, "chain/tx/", z.x.txid) == null); // X's comes by its subscription
+    for (step_facts) |f| try ix.latest.put(f.getText("event").?, f);
+    const s2 = try st2.save();
+
+    // X's `proof` subscription step.
+    var st3 = try c.state.State.load(a, ms.store(), s2, .regtest);
+    const pf = try shape.provenFacts(a, &st3, "chain", z.x.txid, ix.reader());
+    try std.testing.expectEqual(@as(usize, 1), pf.len);
+    try expectFact(pf[0], z.x.txid, "mined", 2);
+    try std.testing.expect((try st3.broadcastRecord(z.x.txid)) == null);
+    try ix.latest.put(pf[0].getText("event").?, pf[0]);
+    // Woken again (the same linkage): nothing new.
+    try std.testing.expectEqual(@as(usize, 0), (try shape.provenFacts(a, &st3, "chain", z.x.txid, ix.reader())).len);
+    // Its output follows from that fact: P.0 spent by X.
+    var out_ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+    try out_ix.deliver(a, &st3, pf);
+    try expectOutput(try out_ix.state(a, z.p.txid, 0), "spent", z.x.txid);
+}
+
+test "0.11.0 held rejected, then a path covering it: the subscription step raises mined (a proof overrides a rejection)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    var st = try c.state.State.load(a, ms.store(), null, .regtest);
+    const z = try liveWorld(a, &st);
+    var bumps = [_]c.bsvz.spv.MerklePath{try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 1, z.fund.txid))};
+    var e1 = [_]c.beef.Entry{
+        .{ .txid = z.fund.txid, .format = .raw_with_bump, .bump = 0, .raw = z.fund.raw, .tx = z.fund.tx },
+        .{ .txid = z.p.txid, .format = .raw, .raw = z.p.raw, .tx = z.p.tx },
+        .{ .txid = z.x.txid, .format = .raw, .raw = z.x.raw, .tx = z.x.tx },
+    };
+    _ = try st.ingest(try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = z.x.txid, .bumps = &bumps, .entries = &e1 }));
+    _ = try st.applyStatus(z.x.txid, "REJECTED", null);
+    var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
+    try ix.latest.put(try shape.txName(a, "chain", z.x.txid), try shape.statusNow(a, &st, "chain", z.x.txid));
+    const s1 = try st.save();
+
+    var st2 = try c.state.State.load(a, ms.store(), s1, .regtest);
+    _ = try st2.applyStatus(z.p.txid, "MINED", try pairBytes(a, 2, z.p.txid, z.x.txid));
+    const s2 = try st2.save();
+    var st3 = try c.state.State.load(a, ms.store(), s2, .regtest);
+    const pf = try shape.provenFacts(a, &st3, "chain", z.x.txid, ix.reader());
+    try std.testing.expectEqual(@as(usize, 1), pf.len);
+    try expectFact(pf[0], z.x.txid, "mined", 2);
+}

@@ -1,4 +1,4 @@
-# The chain app (0.10.0)
+# The chain app (0.11.0)
 
 shruggr/skein#78 (decided 2026-10-01, the tracker issue #31: "the chain is
 its own head, owned by a chain module"). **The chain state is global to an
@@ -188,6 +188,21 @@ the latest thing known, and a later valid proof is `mined`.
 spends what it spends. An `ingest` also emits its subject's status as it
 stands when it was held before, so a listener that rests on the name before
 its ingest hears it.
+
+**Proof linkages** (0.11.0, David 2026-11-10: "the fact that the transaction has a proof is its
+status"). When a merkle path is saved (its root the header's on our best chain), every transaction
+it covers — each level-0 hash whose root, computed through the path, is that header's merkle root;
+no duplicate slot; nothing above level 0 — is linked to the block, held or not, and raised once as
+
+    <app>/proof/<txid hex>   {block: <block hash hex>, height, position}
+
+(skein-sdk 0.21.0 `putProof`, the one writer of the linkage rows, lists exactly what it linked). The
+same path again links nothing and raises nothing. A transaction taken in subscribes its fn `proof` to
+its own `<app>/proof/<txid>` (beside `outputs` on `<app>/tx/<txid>`): covered already, its status at
+intake is `mined` (read from the state) and it is never registered for broadcast; linked later, the
+subscription step settles what the proof settles (double spends, its broadcast record) and raises
+`<app>/tx/<txid>` `mined` with its height when the latest fact is not already that. Our own outgoing
+BEEF carries a linked transaction proven (raw with its BUMP). Reorgs are as in 0.10.0 (inline).
 
 **Output states** (0.10.0, David 2026-11-09). Each output a held transaction
 spends has a state, the fact `<app>/output/<txid hex>.<vout>`:

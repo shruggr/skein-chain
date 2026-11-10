@@ -243,6 +243,45 @@ pub fn statusEvents(a: Allocator, st: *State, app: []const u8, ingested: ?[32]u8
     return out.items;
 }
 
+/// The fact name of a transaction's linkage to where its proof is (0.11.0): `<app>/proof/<txid hex>`.
+pub fn proofName(a: Allocator, app: []const u8, txid: [32]u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}/proof/{s}", .{ app, &c.header.toHex(txid) });
+}
+
+/// The linkages this step established (0.11.0, David 2026-11-10), as facts: for each transaction
+/// a saved merkle path newly linked to its block — held or not (skein-sdk 0.21.0 `State.linked`, the
+/// one writer's list) — `{event: "<app>/proof/<txid>", block: <block hash hex>, height, position}`.
+pub fn proofEvents(a: Allocator, st: *State, app: []const u8) ![]Value {
+    const out = try a.alloc(Value, st.linked.items.len);
+    for (st.linked.items, out) |l, *v| v.* = .{ .map = try a.dupe(cbor.Entry, &.{
+        .{ .key = "event", .value = .{ .text = try proofName(a, app, l.txid) } },
+        .{ .key = "block", .value = try txidText(a, l.block) },
+        .{ .key = "height", .value = .{ .uint = l.height } },
+        .{ .key = "position", .value = .{ .uint = l.position } },
+    }) };
+    return out;
+}
+
+/// A held transaction's `<app>/proof/<t>` subscription step (0.11.0): what its linkage settles in
+/// the state (skein-sdk `settleProven`: double spends, its inputs' spent, its broadcast record), as
+/// facts — every other transaction's status the settling changed, and `t`'s own `mined` with its
+/// height when the state says it is proven and the latest `<app>/tx/<t>` fact is not already that.
+pub fn provenFacts(a: Allocator, st: *State, app: []const u8, t: [32]u8, latest: Latest) ![]Value {
+    try st.settleProven(t);
+    var out: std.ArrayList(Value) = .empty;
+    for (try statusEvents(a, st, app, null)) |e| {
+        if (eql(u8, e.getText("event").?, try txName(a, app, t))) continue;
+        try out.append(a, e);
+    }
+    if ((try st.holds(t)) and (try st.status(t)) == .proven) {
+        const now = try statusNow(a, st, app, t);
+        const last = try latest.of(a, try txName(a, app, t));
+        const same = if (last) |l| eql(u8, l.getText("status") orelse "", "mined") and l.getUint("height") == now.getUint("height") else false;
+        if (!same) try out.append(a, now);
+    }
+    return out.items;
+}
+
 /// What a transaction's answer to an in-VM `ingest` call is (0.10.0): its status in the four
 /// words, as the fact says it — `{txid, status, height?, reason?, by?}`.
 pub fn ingestAnswer(a: Allocator, st: *State, app: []const u8, txid: [32]u8) !Value {
