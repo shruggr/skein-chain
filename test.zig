@@ -738,3 +738,31 @@ test "0.11.0 block out and back by subscription: seen/reorged when it leaves, mi
     try expectFact(factFor(back, "chain/tx/", child.txid).?, child.txid, "mined", 2);
     try std.testing.expect((try st3.broadcastRecord(child.txid)) == null);
 }
+
+test "0.11.0 children: P rejected by the network; its child X proven later — X's fact lifts P's rejection (unproven, broadcast again), no linkage invented" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ms = c.store.MemStore.init(std.testing.allocator);
+    defer ms.deinit();
+    var st = try c.state.State.load(a, ms.store(), null, .regtest);
+    const fund = try funding(a);
+    const h1 = mine(c.header.hash(&c.chain.Network.regtest.genesis()), fund.txid, 1_700_000_600);
+    const p = try spend(a, &fund.tx);
+    const x = try spend(a, &p.tx);
+    _ = try st.addHeaders(&.{ &h1, &mine(c.header.hash(&h1), x.txid, 1_700_001_200) });
+    var bumps = [_]c.bsvz.spv.MerklePath{try c.bsvz.spv.MerklePath.parse(a, try soloPath(a, 1, fund.txid))};
+    var e1 = [_]c.beef.Entry{
+        .{ .txid = fund.txid, .format = .raw_with_bump, .bump = 0, .raw = fund.raw, .tx = fund.tx },
+        .{ .txid = p.txid, .format = .raw, .raw = p.raw, .tx = p.tx },
+        .{ .txid = x.txid, .format = .raw, .raw = x.raw, .tx = x.tx },
+    };
+    _ = try st.ingest(try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = x.txid, .bumps = &bumps, .entries = &e1 }));
+    _ = try st.applyStatus(p.txid, "REJECTED", null);
+    _ = try st.applyStatus(x.txid, "MINED", try soloPath(a, 2, x.txid));
+    var st2 = try c.state.State.load(a, ms.store(), try st.save(), .regtest); // X's `children` step
+    const facts = try shape.childFacts(a, &st2, "chain", x.txid);
+    try expectFact(factFor(facts, "chain/tx/", p.txid).?, p.txid, "pending", null);
+    try std.testing.expectEqual(@as(usize, 1), st2.revived.items.len);
+    try std.testing.expect((try st2.proofBlock(p.txid)) == null);
+}

@@ -212,10 +212,11 @@ events. There shouldn't be any way you can't re-examine them."). Each wake re-re
 | a transaction's status on its proof | `<app>/proof/<txid>` (at intake) | `proof` | the linkage; settles its broadcast record, double spends, inputs' spent; raises `mined` |
 | an output's state on its spender's status | `<app>/tx/<txid>` (at intake) | `outputs` | each output it spends: the live spender |
 | a transaction on its parents | `<app>/tx/<parent>` for each input's transaction (at intake) | `parents` | every held child of that parent: `input-rejected` by the root when a parent is rejected; `revived` (pending, broadcast again) when none is |
+| a transaction's parents on it (a proven child) | `<app>/tx/<txid>` (at intake) | `children` | each held parent: a proven descendant lifts any rejection of it (unproven, broadcast again — no linkage is invented; we hold no path for it) |
 | a mined transaction on its block | `<app>/block/<hash>` (when its `mined` is raised) | `block` | every held transaction linked to that block: `seen`/`reorged`, or `mined` again |
 
 `<app>/block/<hash>` `{height, active}` is raised when a block a linkage names leaves our best chain
-(`active: false`) or comes back (`active: true`). A rejection rejects only its own transaction, and
+(`active: false`) or comes back (`active: true`) — only for what changed in that step. A rejection rejects only its own transaction, and
 never one with a proven descendant (a proven child proves its parents mined). A proof overrides a
 rejection, also after a reorg: the settlement leaves `rejected` (its linkage keeps it, read for its
 reason). A proof before its header is kept whatever the transaction's status (`parked`).

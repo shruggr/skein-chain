@@ -136,6 +136,7 @@ fn run(a: Allocator) anyerror!void {
     if (eql(u8, args.getText("fn") orelse "", PROOF_FN) and args.getCid("event") != null) return onProven(a, &p, args, state, head_name);
     // 0.11.0: a parent's status fact, and a block's place, step the subscriptions made for what depends on them.
     if (eql(u8, args.getText("fn") orelse "", PARENTS_FN) and args.getCid("event") != null) return onParents(a, &p, args, state, head_name);
+    if (eql(u8, args.getText("fn") orelse "", CHILDREN_FN) and args.getCid("event") != null) return onChildren(a, &p, args, state, head_name);
     if (eql(u8, args.getText("fn") orelse "", BLOCK_FN) and args.getCid("event") != null) return onBlock(a, &p, args, state, head_name);
 
     const woke = in.getBool("woke") orelse false;
@@ -242,6 +243,10 @@ const PARENTS_FN = "parents";
 /// The function the app subscribes, per block a mined transaction is in, to `<app>/block/<hash>`.
 const BLOCK_FN = "block";
 
+/// The function the app subscribes, per transaction taken in, to its own `<app>/tx/<txid>` on behalf
+/// of its parents (a proven child lifts a parent's rejection).
+const CHILDREN_FN = "children";
+
 /// 0.10.0: every transaction this step newly held — its status fact steps `outputs`. 0.11.0: its
 /// linkage fact steps `proof`, and each of its parents' status facts steps `parents` (a fact made in
 /// this step too: a subscription made in a step hears that step's facts; one made before it is read
@@ -249,6 +254,7 @@ const BLOCK_FN = "block";
 fn subscribeAdded(a: Allocator, st: *State, app: []const u8) !void {
     for (st.added.items) |t| {
         try vm.on(try shape.txName(a, app, t), OUTPUTS_FN);
+        try vm.on(try shape.txName(a, app, t), CHILDREN_FN);
         try vm.on(try shape.proofName(a, app, t), PROOF_FN);
         const raw = (try st.txRaw(t)) orelse continue;
         const tx = try c.bsvz.transaction.Transaction.parse(a, raw);
@@ -266,9 +272,11 @@ fn raise(a: Allocator, st: *State, app: []const u8, facts: []const Value) !void 
     for (facts) |e| {
         _ = try vm.emitEvent(a, e);
         if (!eql(u8, e.getText("status") orelse "", "mined")) continue;
-        const name = e.getText("event").?;
-        const t = c.header.fromHex(name[(std.mem.lastIndexOfScalar(u8, name, '/') orelse continue) + 1 ..]) catch continue;
-        if (try st.proofBlock(t)) |b| try vm.on(try shape.blockName(a, app, b), BLOCK_FN);
+        // A `mined` fact is raised only for a transaction linked on our best chain: its name ends in
+        // its txid and it has a block, or the fact is wrong — an error, never skipped.
+        const t = try tailHash(e.getText("event").?);
+        const b = (try st.proofBlock(t)) orelse return error.MinedWithoutLinkage;
+        try vm.on(try shape.blockName(a, app, b), BLOCK_FN);
     }
 }
 
@@ -309,6 +317,17 @@ fn onParents(a: Allocator, p: *Step, args: Value, state: ?[]const u8, head_name:
     try raise(a, &p.st, p.conf.app, facts);
     for (p.st.revived.items) |t| try vm.broadcast(a, t, (try p.st.beefOf(t)).?);
     try finishStep(a, p, state, head_name, PARENTS_FN, parent, facts.len);
+}
+
+/// 0.11.0: a transaction's status fact, on behalf of its parents — its `children` subscription's step.
+/// Each held parent is re-derived from the state (a proven child lifts its rejection); a revived one
+/// is broadcast again.
+fn onChildren(a: Allocator, p: *Step, args: Value, state: ?[]const u8, head_name: []const u8) !void {
+    const child = try tailHash(args.getText("box") orelse return error.BadInput);
+    const facts = try shape.childFacts(a, &p.st, p.conf.app, child);
+    try raise(a, &p.st, p.conf.app, facts);
+    for (p.st.revived.items) |t| try vm.broadcast(a, t, (try p.st.beefOf(t)).?);
+    try finishStep(a, p, state, head_name, CHILDREN_FN, child, facts.len);
 }
 
 /// 0.11.0: a block's place changed — its subscription's step. What was mined in it is re-read from

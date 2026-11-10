@@ -314,10 +314,11 @@ fn latestIsMined(a: Allocator, app: []const u8, t: [32]u8, latest: Latest, heigh
 pub fn blockFacts(a: Allocator, st: *State, app: []const u8, hash: [32]u8, height: u32, latest: Latest) ![]Value {
     const moved = try st.blockChanged(hash, height);
     var out: std.ArrayList(Value) = .empty;
+    // The moved transactions' own facts are raised below: their names, once each (linear).
+    var own = std.StringHashMap(void).init(a);
+    for (moved) |m| try own.put(try txName(a, app, m.txid), {});
     for (try statusEvents(a, st, app, null)) |e| {
-        var own = false;
-        for (moved) |m| own = own or eql(u8, e.getText("event").?, try txName(a, app, m.txid));
-        if (!own) try out.append(a, e);
+        if (!own.contains(e.getText("event").?)) try out.append(a, e);
     }
     for (moved) |m| {
         if (m.proven) {
@@ -335,6 +336,20 @@ pub fn blockFacts(a: Allocator, st: *State, app: []const u8, hash: [32]u8, heigh
 /// no longer — `revived`), as facts.
 pub fn parentFacts(a: Allocator, st: *State, app: []const u8, parent: [32]u8) ![]Value {
     for (try st.spendersOfTx(parent)) |child| _ = try st.reexamine(child);
+    return statusEvents(a, st, app, null);
+}
+
+/// A child's `<app>/tx/<child>` subscription step on behalf of its parents (0.11.0, fn `children`):
+/// each held parent re-derived from the state (skein-sdk `reexamine`: a proven descendant lifts any
+/// rejection of it — it is mined in fact, but no path is held for it, so unproven, broadcast again).
+pub fn childFacts(a: Allocator, st: *State, app: []const u8, child: [32]u8) ![]Value {
+    const raw = (try st.txRaw(child)) orelse return &.{};
+    const tx = try c.bsvz.transaction.Transaction.parse(a, raw);
+    for (tx.inputs) |in| {
+        const prev = in.previous_outpoint;
+        if (prev.index == 0xffffffff and std.mem.allEqual(u8, &prev.txid.bytes, 0)) continue;
+        _ = try st.reexamine(prev.txid.bytes);
+    }
     return statusEvents(a, st, app, null);
 }
 
