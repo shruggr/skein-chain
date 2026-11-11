@@ -1,7 +1,7 @@
 {
   "kind": "app",
   "name": "chain",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "programs": {
     "chain": "bin/chain.wasm"
   },
