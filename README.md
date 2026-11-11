@@ -127,7 +127,7 @@ at a pinned commit.
 | | |
 |---|---|
 | this app | 0.11.1 (tag `v0.11.1`) |
-| skein-sdk | 0.21.3 (commit a1af1c0 on branch `skip-held-0.21.3`, until tagged), by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
+| skein-sdk | v0.21.3, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
 | skein | 0.5.4 or later (the event index, 0.5.0: the facts; a thread resting on a name, 0.5.4: the listeners); skein's equivs pin this repo by commit |
 
 0.11.1 (skein-sdk 0.21.3): `ingest` does not script-check again a transaction a BEEF carries raw that the chain state already holds (in `txs`); it is treated as its txid-only entry.
