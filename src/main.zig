@@ -8,8 +8,9 @@
 //!   box `chain`, a message {fn, args}     from a caller the kernel admits (skein#143: an open route, filter kernel.beef — the instance's own apps, root):
 //!       ingest {beef}     record a BEEF: the envelope the kernel's door wrote (skein #121, #146), or bytes. Proven (its BUMPs verify against our headers): answered at
 //!                         once. Unproven: recorded and broadcast (the event the host carries to its
-//!                         network); answered at once only when it is accepted already. 0.8.0: no
-//!                         watchers — every status of a transaction (below) is a fact.
+//!                         network); not answered (0.12.0: no status but a rejection or a proof ever
+//!                         comes, and those are facts). 0.8.0: no watchers — every status of a
+//!                         transaction (below) is a fact.
 //!       status {txid}     the transaction's state (CIDs: tx, block, settlement, broadcast)
 //!       proof {txid}      where its proof is: the header's CID, height, depth, position
 //!   box `chain`, an event (no sender)    the host's wiring: `chain` ({root, height}: the host chain's
@@ -19,7 +20,10 @@
 //!                                        transaction no thread awaits. A `header` event is refused
 //!                                        (BadEvent): the header chain is the host's
 //!   box `chain/status`, a message        a status provider's ({kind: "status", txid, txStatus, …},
-//!                                        about its subject), for a transaction no thread awaits
+//!                                        about its subject), for a transaction no thread awaits.
+//!                                        0.12.0 (David 2026-11-11): only a rejection (REJECTED: the
+//!                                        transaction is invalid) or a proof means anything; any other
+//!                                        status changes nothing (the host keeps those)
 //!   a thread resting after a broadcast   its transactions' proofs (input `event`), statuses (input
 //!                                        `message`); it has no deadline of its own
 //!
@@ -35,8 +39,9 @@
 //!
 //! Every status of a transaction a step comes to is recorded (the state) and emitted as the fact
 //! `<app>/tx/<txid>` (skein 0.5.0's event index; listeners rest on the name, skein 0.5.4), in four
-//! words (0.10.0, David 2026-11-09): `pending` (at intake: held, broadcast asked for, no answer yet),
-//! `seen` (the network has it; after a reorg with `reason: "reorged"`), `mined` (`height`),
+//! words (0.10.0, David 2026-11-09): `pending` (at intake: held, broadcast asked for; 0.12.0: until a
+//! rejection or a proof), `seen` (0.12.0: only after a reorg, with `reason: "reorged"`: it was mined
+//! and its block left our best chain), `mined` (`height`),
 //! `rejected` (`reason`; `by` the winner of a double spend or the root of an input-rejected
 //! cascade). EVERY transaction gets one at intake (skein-sdk 0.19.0 `added`), and an ingest
 //! emits its subject's status as it stands. None is final: a later proof is `mined`.
@@ -168,7 +173,7 @@ fn run(a: Allocator) anyerror!void {
         try onMessage(&p, args, try s.getValue(a, bc));
     } else return error.BadInput;
 
-    // 0.8.0 (David 2026-11-09): every status of a transaction this step came to — accepted, rejected,
+    // 0.8.0 (David 2026-11-09): every status of a transaction this step came to — rejected,
     // mined (with its height), reorged — is recorded (the state) and emitted as the fact
     // `<app>/tx/<txid>` {status, height?}; no watchers. A reorg this step turned proven transactions
     // back to unproven is broadcast nowhere (0.7.1): the fact `reorged`; the new proof arrives as the
@@ -478,7 +483,7 @@ fn callOf(p: *Step, name: []const u8, fargs: Value) !Outcome {
         .status, .proof => {
             const txid = (try shape.txidArg(fargs)) orelse return .{ .err = .{ .code = "bad-args", .message = "args.txid: want 64 hex digits" } };
             try p.field("txid", try p.hex(txid));
-            if (f == .status) return .{ .ok = try shape.txState(a, &p.st, txid, null, "") };
+            if (f == .status) return .{ .ok = try shape.txState(a, &p.st, txid) };
             return if (try shape.proofOf(a, &p.st, txid)) |v| .{ .ok = v } else .{ .err = .{ .code = "failed", .message = "not proven" } };
         },
         .ingest => {
@@ -503,12 +508,9 @@ fn callOf(p: *Step, name: []const u8, fargs: Value) !Outcome {
             p.ingested = got.txid;
             switch (got.status) {
                 // Proven or rejected in: answered at once.
-                .proven, .rejected => return .{ .ok = try shape.txState(a, &p.st, got.txid, null, "") },
-                .unproven => {
-                    const r = (try p.st.broadcastRecord(got.txid)).?;
-                    if (r.getBool("accepted") orelse false) return .{ .ok = try shape.txState(a, &p.st, got.txid, "accepted", "") };
-                    return .none;
-                },
+                .proven, .rejected => return .{ .ok = try shape.txState(a, &p.st, got.txid) },
+                // 0.12.0: nothing more to answer — its later rejection or proof is a fact.
+                .unproven => return .none,
             }
         },
     }
@@ -527,7 +529,7 @@ fn onCall(a: Allocator, in: Value) !void {
     const state = try vm.head(a, try conf.stateHead(a));
     const network = if (state) |sc| c.chain.Network.parse((try s.getValue(a, sc)).getText("network") orelse "") orelse .main else .main;
     var st = try loadState(a, s, state, network);
-    if (f == .status) return vm.answer(a, try shape.txState(a, &st, txid, null, ""));
+    if (f == .status) return vm.answer(a, try shape.txState(a, &st, txid));
     return vm.answer(a, (try shape.proofOf(a, &st, txid)) orelse .null);
 }
 

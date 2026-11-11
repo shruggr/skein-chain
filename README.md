@@ -15,7 +15,7 @@ manifest). Its interface is `chain/1` on box `chain`:
 | fn | args | writes | answered |
 |---|---|---|---|
 | `ingest` | `{beef}` | yes | a message (proven in: answered at once; unproven in: recorded, broadcast) or, 0.10.0, an in-VM call from a program's step (answered `{txid, status, height?, reason?, by?}`: the step's own write) |
-| `status` | `{txid}` | no | at once: `{txid, state, tx?, block?, height?, txStatus?, broadcast?, reason?, settlement?}` (CIDs) |
+| `status` | `{txid}` | no | at once: `{txid, state, tx?, block?, height?, broadcast?, reason?, settlement?}` (CIDs) |
 | `proof` | `{txid}` | no | at once: `{txid, tx, block, height, depth, position}` |
 
 Its routes (`etc/app.json`, shruggr/skein#143):
@@ -35,7 +35,7 @@ until the transaction is `proven` or `rejected`, and then the registration
 ends. The decided direction (shruggr/skein#31, "Decided 2026-10-02
 (night)") is that a reference to a transaction is a subscription for the
 life of the transaction: every registration is kept, and every change of
-its chain state (accepted, proven, reorged out, conflicted by a proven
+its chain state (proven, rejected, reorged out, conflicted by a proven
 spend) reaches every registrant, which reads the chain state again. That is
 not built yet.
 
@@ -126,9 +126,11 @@ at a pinned commit.
 
 | | |
 |---|---|
-| this app | 0.11.1 (tag `v0.11.1`) |
-| skein-sdk | v0.21.3, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
+| this app | 0.12.0 (branch `one-step-0.12`, untagged) |
+| skein-sdk | 0.22.0 by commit 1a6b875 (branch `one-step-0.22`; rewrite to tag `v0.22.0` at release), URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
 | skein | 0.5.4 or later (the event index, 0.5.0: the facts; a thread resting on a name, 0.5.4: the listeners); skein's equivs pin this repo by commit |
+
+0.12.0 (David 2026-11-11; skein-sdk 0.22.0): an instance hears only rejected or mined. A status into `chain/status` changes the state only when it is a rejection (REJECTED, INVALID, MALFORMED) or carries a proof; RECEIVED, SEEN_ON_NETWORK and the like change nothing and raise no fact. DOUBLE_SPEND_ATTEMPTED is no rejection word (the broadcaster never produces it; a double spend arrives as a plain REJECTED). `pending` stays until a rejection or a proof; `seen` now means only one thing — after a reorg, `reason: "reorged"` (it was mined, its block left our best chain). The broadcast record drops `accepted` and `txStatus`; `status {txid}` carries no `txStatus`; an unproven ingest by message is never answered (its later facts are). The state's shape is unchanged: a state written by 0.11.x opens, its broadcast records' old fields ignored (an unproven transaction an old status marked `accepted` reads `pending`).
 
 0.11.1 (skein-sdk 0.21.3): `ingest` does not script-check again a transaction a BEEF carries raw that the chain state already holds (in `txs`); it is treated as its txid-only entry.
 

@@ -88,11 +88,10 @@ fn txCid(a: Allocator, txid: [32]u8) !Value {
 
 /// What a caller is told about a transaction: `{txid, tx, state, …}` — CIDs, not data.
 ///   proven    block (its header's CID), height
-///   accepted  txStatus (the status that accepted it)
 ///   rejected  reason, settlement (the settlement record's CID)
-///   unproven  broadcast (the registered broadcast record's CID), txStatus   (a read only)
+///   unproven  broadcast (the registered broadcast record's CID)   (a read only)
 ///   unknown   (a read only: not held)
-pub fn txState(a: Allocator, st: *State, txid: [32]u8, as: ?[]const u8, detail: []const u8) !Value {
+pub fn txState(a: Allocator, st: *State, txid: [32]u8) !Value {
     var es: std.ArrayList(cbor.Entry) = .empty;
     try es.append(a, .{ .key = "txid", .value = try txidText(a, txid) });
     if (!(try st.holds(txid))) {
@@ -101,8 +100,7 @@ pub fn txState(a: Allocator, st: *State, txid: [32]u8, as: ?[]const u8, detail: 
     }
     try es.append(a, .{ .key = "tx", .value = try txCid(a, txid) });
     const status = try st.status(txid);
-    const name = as orelse @tagName(status);
-    try es.append(a, .{ .key = "state", .value = .{ .text = name } });
+    try es.append(a, .{ .key = "state", .value = .{ .text = @tagName(status) } });
     switch (status) {
         .proven => {
             const r = (try st.proofRecord(txid)).?;
@@ -115,12 +113,7 @@ pub fn txState(a: Allocator, st: *State, txid: [32]u8, as: ?[]const u8, detail: 
             try es.append(a, .{ .key = "reason", .value = .{ .text = (try st.record(sc)).getText("reason") orelse "" } });
         },
         .unproven => {
-            if (try st.broadcastCid(txid)) |bc| {
-                try es.append(a, .{ .key = "broadcast", .value = .{ .cid = bc } });
-                const r = try st.record(bc);
-                const ts = if (detail.len > 0) detail else r.getText("txStatus") orelse "";
-                if (ts.len > 0) try es.append(a, .{ .key = "txStatus", .value = .{ .text = ts } });
-            }
+            if (try st.broadcastCid(txid)) |bc| try es.append(a, .{ .key = "broadcast", .value = .{ .cid = bc } });
         },
     }
     return .{ .map = es.items };
@@ -171,10 +164,11 @@ pub fn outputName(a: Allocator, app: []const u8, txid: [32]u8, vout: u32) ![]con
 }
 
 /// A transaction's status as a fact (0.10.0, David 2026-11-09): the emit `{event: "<app>/tx/<txid
-/// hex>", status, height?, reason?, by?}` — `status` one of four: "pending" (held, its broadcast
-/// asked for, no answer yet), "seen" (the network has it; after a reorg with `reason` "reorged"),
-/// "mined" (with `height`, its block's on our best chain), "rejected" (with `reason`; `by` the
-/// winner of a double spend, or the cascade's root for "input-rejected"). None is final.
+/// hex>", status, height?, reason?, by?}` — `status` one of four: "pending" (held, unproven, not
+/// rejected: its broadcast asked for), "seen" (0.12.0: only after a reorg, with `reason` "reorged" —
+/// it was mined and its block left our best chain; no status from the network makes it), "mined"
+/// (with `height`, its block's on our best chain), "rejected" (with `reason`; `by` the winner of a
+/// double spend, or the cascade's root for "input-rejected"). None is final.
 pub fn statusEvent(a: Allocator, app: []const u8, txid: [32]u8, status: []const u8, height: ?u64, reason: ?[]const u8, by: ?[32]u8) !Value {
     var es: std.ArrayList(cbor.Entry) = .empty;
     try es.appendSlice(a, &.{
@@ -195,9 +189,8 @@ fn minedHeight(st: *State, txid: [32]u8) !?u64 {
     return h;
 }
 
-/// A held transaction's status as it stands, in the four words: proven "mined"; rejected
-/// "rejected" (its settlement's reason and cause); unproven "seen" once a status accepted it, else
-/// "pending".
+/// A held transaction's status as it stands: proven "mined"; rejected "rejected" (its settlement's
+/// reason and cause); unproven "pending" (0.12.0: no network status accepts it any more).
 pub fn statusNow(a: Allocator, st: *State, app: []const u8, txid: [32]u8) !Value {
     return switch (try st.status(txid)) {
         .proven => statusEvent(a, app, txid, "mined", try minedHeight(st, txid), null, null),
@@ -205,19 +198,16 @@ pub fn statusNow(a: Allocator, st: *State, app: []const u8, txid: [32]u8) !Value
             const r = (try st.rejectionOf(txid)) orelse break :blk statusEvent(a, app, txid, "rejected", null, "rejected", null);
             break :blk statusEvent(a, app, txid, "rejected", null, r.reason, r.by);
         },
-        .unproven => blk: {
-            const seen = if (try st.broadcastRecord(txid)) |r| r.getBool("accepted") orelse false else false;
-            break :blk statusEvent(a, app, txid, if (seen) "seen" else "pending", null, null, null);
-        },
+        .unproven => statusEvent(a, app, txid, "pending", null, null, null),
     };
 }
 
 /// Every status this step came to, as facts, in order (0.10.0):
 ///   - each transaction a reorg turned back to unproven (`st.reverted`): "seen", reason "reorged";
-///   - each state change of a transaction with a registered broadcast (`st.changes`): "seen" (was
-///     "accepted"), "mined" with its height, "rejected" with its reason and cause;
+///   - each state change of a transaction with a registered broadcast (`st.changes`): "mined" with
+///     its height, "rejected" with its reason and cause (0.12.0: no "seen" from a network status);
 ///   - each transaction this step newly held (`st.added`, skein-sdk 0.19.0): its status at intake
-///     ("pending", "mined", "rejected", "seen") — every transaction gets one;
+///     ("pending", "mined", "rejected") — every transaction gets one;
 ///   - an ingest's subject: its status as it stands, also when it was held before.
 /// A transaction's same status twice in one step is one fact.
 pub fn statusEvents(a: Allocator, st: *State, app: []const u8, ingested: ?[32]u8) ![]Value {
@@ -233,7 +223,6 @@ pub fn statusEvents(a: Allocator, st: *State, app: []const u8, ingested: ?[32]u8
         }
     }.f;
     for (st.changes.items) |ch| try add(a, &said, &out, ch.txid, switch (ch.state) {
-        .accepted => try statusEvent(a, app, ch.txid, "seen", null, null, null),
         .proven => try statusEvent(a, app, ch.txid, "mined", try minedHeight(st, ch.txid), null, null),
         .rejected => try statusEvent(a, app, ch.txid, "rejected", null, ch.detail, ch.by),
         // 0.11.0: an `input-rejected` that no longer holds: its status as the state has it now.
@@ -353,8 +342,7 @@ pub fn childFacts(a: Allocator, st: *State, app: []const u8, child: [32]u8) ![]V
     return statusEvents(a, st, app, null);
 }
 
-/// What a transaction's answer to an in-VM `ingest` call is (0.10.0): its status in the four
-/// words, as the fact says it — `{txid, status, height?, reason?, by?}`.
+/// What a transaction's answer to an in-VM `ingest` call is (0.10.0): its status as the fact says it — `{txid, status, height?, reason?, by?}`.
 pub fn ingestAnswer(a: Allocator, st: *State, app: []const u8, txid: [32]u8) !Value {
     const ev = try statusNow(a, st, app, txid);
     var es: std.ArrayList(cbor.Entry) = .empty;

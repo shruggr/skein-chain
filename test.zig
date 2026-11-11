@@ -55,7 +55,7 @@ test "answers: {fn, request, replyTo, result | error}; an unknown transaction's 
     var ms = c.store.MemStore.init(std.testing.allocator);
     defer ms.deinit();
     var st = try c.state.State.load(a, ms.store(), null, .regtest);
-    const v = try shape.txState(a, &st, .{9} ** 32, null, "");
+    const v = try shape.txState(a, &st, .{9} ** 32);
     try std.testing.expectEqualStrings("unknown", v.getText("state").?);
     try std.testing.expect(try shape.proofOf(a, &st, .{9} ** 32) == null);
     const args = try map(a, &.{ .{ .key = "txid", .value = .{ .text = "ab" ** 32 } }, .{ .key = "beef", .value = .{ .text = "0102" } } });
@@ -144,7 +144,7 @@ fn factOf(facts: []const Value, txid: [32]u8) !Value {
     return found orelse error.NoFact;
 }
 
-test "every status a fact (0.10.0): pending at intake (its proven parent mined), seen, mined at 2, seen+reorged, mined at 4 — chain/tx/<txid> each time" {
+test "every status a fact (0.12.0): pending at intake (its proven parent mined), a network status changes nothing, mined at 2, seen+reorged, mined at 4 — chain/tx/<txid> each time" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -173,16 +173,19 @@ test "every status a fact (0.10.0): pending at intake (its proven parent mined),
     try expectFact(intake[1], child.txid, "pending", null);
     const ingested = try st.save();
 
-    // A status accepts it.
+    // 0.12.0 (David 2026-11-11): a status that is neither a rejection nor a proof changes nothing —
+    // no fact, the state as it was.
     var st1 = try State.load(a, ms.store(), ingested, .regtest);
-    try std.testing.expectEqual(State.Outcome.accepted, try st1.applyStatus(child.txid, "SEEN_ON_NETWORK", null));
+    try std.testing.expectEqual(State.Outcome.pending, try st1.applyStatus(child.txid, "SEEN_ON_NETWORK", null));
+    try std.testing.expectEqual(State.Outcome.pending, try st1.applyStatus(child.txid, "RECEIVED", null));
     var facts = try shape.statusEvents(a, &st1, "chain", null);
-    try std.testing.expectEqual(@as(usize, 1), facts.len);
-    try expectFact(facts[0], child.txid, "seen", null);
-    // Ingested again, accepted already: its status as it stands, once.
+    try std.testing.expectEqual(@as(usize, 0), facts.len);
+    try std.testing.expectEqualStrings(ingested, try st1.save());
+    // Ingested again: its status as it stands, once — still `pending`.
     _ = try st1.ingest(beef);
     facts = try shape.statusEvents(a, &st1, "chain", child.txid);
     try std.testing.expectEqual(@as(usize, 1), facts.len);
+    try expectFact(facts[0], child.txid, "pending", null);
     const accepted = try st1.save();
 
     // Proven at height 2.
@@ -194,7 +197,7 @@ test "every status a fact (0.10.0): pending at intake (its proven parent mined),
     try std.testing.expectEqual(@as(usize, 0), (try shape.statusEvents(a, &st2, "chain", null)).len);
     try std.testing.expect(factFor(try shape.proofEvents(a, &st2, "mychain"), "mychain/proof/", child.txid) != null);
     var ix = Index{ .latest = std.StringHashMap(Value).init(a) };
-    try ix.latest.put(try shape.txName(a, "chain", child.txid), try shape.statusEvent(a, "chain", child.txid, "seen", null, null, null));
+    try ix.latest.put(try shape.txName(a, "chain", child.txid), try shape.statusEvent(a, "chain", child.txid, "pending", null, null, null));
     facts = try shape.provenFacts(a, &st2, "chain", child.txid, ix.reader());
     try std.testing.expectEqual(@as(usize, 1), facts.len);
     try expectFact(facts[0], child.txid, "mined", 2);
@@ -253,12 +256,14 @@ test "rejected (0.10.0): a network rejection is the fact `rejected` with its rea
     };
     const beef = try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = child.txid, .bumps = &bumps, .entries = &entries });
     _ = try st.ingest(beef);
-    try std.testing.expectEqual(State.Outcome.rejected, try st.applyStatus(child.txid, "DOUBLE_SPEND_ATTEMPTED", null));
+    // 0.12.0: DOUBLE_SPEND_ATTEMPTED is no rejection word (nothing); a double spend arrives as REJECTED.
+    try std.testing.expectEqual(State.Outcome.pending, try st.applyStatus(child.txid, "DOUBLE_SPEND_ATTEMPTED", null));
+    try std.testing.expectEqual(State.Outcome.rejected, try st.applyStatus(child.txid, "REJECTED", null));
     const facts = try shape.statusEvents(a, &st, "chain", child.txid);
     try std.testing.expectEqual(@as(usize, 2), facts.len); // the funding's intake `mined`, the child once
     const f = try factOf(facts, child.txid);
     try expectFact(f, child.txid, "rejected", null);
-    try std.testing.expectEqualStrings("DOUBLE_SPEND_ATTEMPTED", f.getText("reason").?);
+    try std.testing.expectEqualStrings("REJECTED", f.getText("reason").?);
     try std.testing.expect(f.get("by") == null);
 }
 
@@ -281,7 +286,7 @@ test "a proof after a rejection (0.9.0, skein-sdk 0.18.0): the latest fact — `
     };
     const beef = try c.beef.serialize(a, .{ .version = c.beef.V2, .atomic = child.txid, .bumps = &bumps, .entries = &entries });
     _ = try st.ingest(beef);
-    try std.testing.expectEqual(State.Outcome.rejected, try st.applyStatus(child.txid, "DOUBLE_SPEND_ATTEMPTED", null));
+    try std.testing.expectEqual(State.Outcome.rejected, try st.applyStatus(child.txid, "REJECTED", null));
     const rejected = try st.save();
 
     var st2 = try State.load(a, ms.store(), rejected, .regtest);
@@ -292,7 +297,7 @@ test "a proof after a rejection (0.9.0, skein-sdk 0.18.0): the latest fact — `
     const facts = try shape.provenFacts(a, &st2, "chain", child.txid, ix.reader()); // its `proof` subscription step
     try std.testing.expectEqual(@as(usize, 1), facts.len);
     try expectFact(facts[0], child.txid, "mined", 2);
-    try std.testing.expectEqualStrings("DOUBLE_SPEND_ATTEMPTED", (try st2.record((try st2.settlementCid(child.txid)).?)).getText("reason").?);
+    try std.testing.expectEqualStrings("REJECTED", (try st2.record((try st2.settlementCid(child.txid)).?)).getText("reason").?);
 }
 
 // ------------------------------------------------------------ 0.10.0: output states, by subscription

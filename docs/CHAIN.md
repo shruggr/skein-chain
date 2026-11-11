@@ -45,12 +45,11 @@ SDK's `mst`); txids and block hashes in internal byte order.
 transaction is in `unproven` only while `broadcasts` holds its record:
 
 ```
-{kind: "broadcast", txid (hex), subject: <tx CID>, since: ms, txStatus,
- accepted?: true, path?: bytes, watchers: []}
+{kind: "broadcast", txid (hex), subject: <tx CID>, since: ms, path?: bytes, watchers: []}
 ```
 
-`since` is its first broadcast; `accepted` is set by
-the first status that is not a rejection; `path` is a proof that came
+`since` is its first broadcast (0.12.0: no `txStatus`, no `accepted` — a record
+written before keeps them, ignored); `path` is a proof that came
 before its header (tried again when headers arrive); `watchers` is empty
 since 0.8.0 (the field is the SDK's record shape; nothing registers a
 watcher: every status is a fact, below). Proven or rejected, the record goes
@@ -177,10 +176,10 @@ the latest thing known, and a later valid proof is `mined`.
 
 | `status` | when | also |
 |---|---|---|
-| `pending` | at intake: held, its broadcast asked for, no answer yet | |
-| `seen` | the first status from the status provider that is not a rejection (RECEIVED, SEEN_ON_NETWORK, …: was `accepted`); a reorg turned it back to unproven | after a reorg `reason: "reorged"` |
+| `pending` | at intake: held, its broadcast asked for; it stays so until a rejection or a proof (0.12.0) | |
+| `seen` | 0.12.0: only a reorg turned it back to unproven (it was `mined`). No status from the network makes it (David 2026-11-11: an instance hears only rejected or mined; the broadcaster's other statuses stay in the host) | `reason: "reorged"` |
 | `mined` | its proof, on the best chain (at intake for a transaction that arrives proven, a BEEF's ancestors included); again after a reorg, proven in another block | `height` |
-| `rejected` | a rejecting status (REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED: the reason), a competing spend proven (`double-spent`), something it spends rejected (`input-rejected`) | `reason` (the settlement record's); `by`: the winner of a double spend, or the cascade's root (the settlement's `cause`, skein-sdk 0.19.0) |
+| `rejected` | a rejecting status (REJECTED, INVALID, MALFORMED: the reason; 0.12.0: no DOUBLE_SPEND_ATTEMPTED, the broadcaster never produces it), a competing spend proven (`double-spent`), something it spends rejected (`input-rejected`) | `reason` (the settlement record's); `by`: the winner of a double spend, or the cascade's root (the settlement's `cause`, skein-sdk 0.19.0) |
 
 **Every transaction gets a status at intake**: each one a step newly holds
 (skein-sdk 0.19.0 `State.added`: an ingest's parents first) — `pending`, or
@@ -258,8 +257,7 @@ while senders use it.
 
 The caller of `ingest` (the message's sender) is answered once, at its
 address, in the box it wrote to, as an app answers (docs/APPS.md §4) — when
-there is a status to answer at the ingest (proven, rejected, accepted
-already), or an error:
+there is a status to answer at the ingest (proven, rejected), or an error:
 
 ```
 {fn, request: <the request message's CID>, replyTo: <the same>, result: {txid, tx: <CID>, state, …}}
@@ -269,17 +267,16 @@ already), or an error:
 | state | result also carries |
 |---|---|
 | `proven` | `block` (the header's CID), `height` |
-| `accepted` | `txStatus`, `broadcast` (the broadcast record's CID) |
 | `rejected` | `reason`, `settlement` (the settlement record's CID) |
 
-An unproven transaction not yet accepted is not answered: its statuses are
-the facts. An answer goes out only when the address book reaches the caller;
+An unproven transaction is not answered (0.12.0): its later statuses are the
+facts. An answer goes out only when the address book reaches the caller;
 either way it is in the log. Errors: `bad-request` (no `fn`), `unknown-fn`,
 `bad-args`, `failed` (`ingest: InvalidBeef`, `RootMismatch`,
 `UnknownHeader`, `ScriptFailed`, `MissingInput`, …; `not proven` for
 `proof`).
 
-**`status {txid}`** → `{txid, state: proven | unproven | rejected | unknown, tx?, block?, height?, txStatus?, broadcast?, reason?, settlement?}`.
+**`status {txid}`** → `{txid, state: proven | unproven | rejected | unknown, tx?, block?, height?, broadcast?, reason?, settlement?}`.
 **`proof {txid}`** → `{txid, tx, block, height, depth, position}`: the
 header's CID, its height, and the leaf's place; the merkle nodes are in
 the store under the header's merkle root.
@@ -301,9 +298,11 @@ a kernel call of it is refused: it writes.
 
 **The status provider's messages** (box `chain/status`, signed by the provider,
 `subject` the transaction): `{kind: "status", txid, txStatus, …}` — to the
-thread awaiting the transaction, else this app's `status` row. Statuses
-are optional: without a provider a transaction is proven by its proof,
-rejected by a competing proof, and never `accepted`.
+thread awaiting the transaction, else this app's `status` row. 0.12.0: only
+a rejection (or a `merklePath`, a proof) changes anything; any other status
+is recorded on the step's result and changes nothing. Statuses are optional:
+without a provider a transaction is proven by its proof and rejected by a
+competing proof.
 
 The chain app is the only thing that emits the broadcast event. The
 wallet and the overlay apps (shruggr/skein#79) neither broadcast nor take
@@ -317,7 +316,7 @@ resting on the transaction's name hears, for the life of the transaction
 direction (shruggr/skein#31, "Decided 2026-10-02 (night)") is not built yet:
 
 - A registration lasts for the life of the transaction. Every change of its
-  chain state (accepted, proven, reorged out, conflicted by a proven spend)
+  chain state (proven, rejected, reorged out, conflicted by a proven spend)
   goes to every registrant, which wakes and reads the chain state again.
 - There is no unwind or replay as an action. Whether a judgement counts is
   a read of the chain state; a judgement is re-run when the chain state it
