@@ -126,9 +126,11 @@ at a pinned commit.
 
 | | |
 |---|---|
-| this app | 0.12.0 (tag `v0.12.0`) |
-| skein-sdk | v0.22.0, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
+| this app | 0.12.1 (tag `v0.12.1`) |
+| skein-sdk | v0.22.1, by tag URL and hash in `build.zig.zon` (module `chain`; bsvz comes through it) |
 | skein | 0.5.4 or later (the event index, 0.5.0: the facts; a thread resting on a name, 0.5.4: the listeners); skein's equivs pin this repo by commit |
+
+0.12.1 (David 2026-11-11; skein-sdk 0.22.1): `ingest` reads every transaction a BEEF carries raw that the chain state already holds (in `txs`), except its subject, as its txid-only entry: no scripts, nothing stored, kept, rejected or registered again for it. A BUMP in it proving a held transaction that has no proof on our best chain yet is still checked against our header and saved: every transaction it covers linked, each `chain/proof/<txid>` raised as before; a BUMP proving only held, proven transactions is dropped. The subject's own status fact is raised at every ingest as before. The state's shape is unchanged.
 
 0.12.0 (David 2026-11-11; skein-sdk 0.22.0): an instance hears only rejected or mined. A status into `chain/status` changes the state only when it is a rejection (REJECTED, INVALID, MALFORMED) or carries a proof; RECEIVED, SEEN_ON_NETWORK and the like change nothing and raise no fact. DOUBLE_SPEND_ATTEMPTED is no rejection word (the broadcaster never produces it; a double spend arrives as a plain REJECTED). `pending` stays until a rejection or a proof; `seen` now means only one thing — after a reorg, `reason: "reorged"` (it was mined, its block left our best chain). The broadcast record drops `accepted` and `txStatus`; `status {txid}` carries no `txStatus`; an unproven ingest by message is never answered (its later facts are). The state's shape is unchanged: a state written by 0.11.x opens, its broadcast records' old fields ignored (an unproven transaction an old status marked `accepted` reads `pending`).
 
